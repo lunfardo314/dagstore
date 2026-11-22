@@ -18,11 +18,18 @@ The full design is in [SPEC.md](SPEC.md).
 
 ## Status
 
-Design only. Nothing is built yet.
+Early development. What exists is an offline importer: it reads the transaction store of a stopped Proxima node and writes the history it holds into a new dagstore database, to test the database design and measure its size on real data (results in [SPEC.md](SPEC.md), section 8.2.1). The dagstore node itself is not built yet.
 
 ## How to run
 
-To be written once there is something to run.
+The importer, on a copy of a node's databases (the node must be stopped; opening its state database may write to it):
+
+```
+go build -o dagstore-import ./cmd/dagstore-import
+./dagstore-import -txstore <node dir>/proximadb.txstore -state <node dir>/proximadb -out history.db
+```
+
+It prints what it found and the size of every table. During development the module builds against a local checkout of the Proxima repository (the `replace` line in `go.mod`).
 
 ## License
 

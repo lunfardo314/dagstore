@@ -6,7 +6,7 @@
 
 - Every node stores every transaction it ever received, raw, in `proximadb.txstore` (Badger, key = txid, value = bytes; [`txstore/txstore.go`](https://github.com/lunfardo314/proxima/blob/develop/txstore/txstore.go)). Nothing deletes from it. Two nodes on one box hold two copies, and neither is guaranteed complete.
 - A node that has run since genesis keeps everything back to genesis, and that database only grows. **Bounding it is the main reason for the dagstore.**
-- The ledger's history is the past cone of the branches of the canonical lineage. A large share of stored transactions, up to about half, are orphans and are not history.
+- The ledger's history is the past cone of the branches of the canonical lineage. Part of what is stored are orphans, which are not history: the share depends on what counts as history (section 8.2.1 measured 6% when every branch's cone is kept, 43% when only canonical cones are).
 - The tools (`proxi db txstore get|list|audit|crosscheck|dagviz`, [`api/dag_explorer`](https://github.com/lunfardo314/proxima/tree/develop/api/dag_explorer)) are basic, because a key-value store keyed by txid supports only lookup by txid and iteration by slot prefix.
 
 ## 2. Goal
@@ -171,7 +171,7 @@ Stem data carries each branch's total coverage and supply. The dagstore stores t
 The history walker goes forward through the branch table, slot by slot from the starting branch: the canonical branch of the slot first, then the slot's other branches.
 
 - For branch `b`, walk its cone delta over its predecessor (the carved-out cone walker): inputs (producer = `oid.TransactionID()`) and endorsements, stopping at transactions already reached from `b`'s lineage. A canonical `b` becomes the confirming branch of what it newly reaches; every reached transaction is kept.
-- A referenced txid not in the store is pulled. Only transactions in some branch's cone are pulled during the history pass, so no bandwidth goes to orphans. A losing branch's cone overlaps the canonical cone of its slot almost entirely, so keeping losing branches costs little beyond the branches themselves.
+- A referenced txid not in the store is pulled. Only transactions in some branch's cone are pulled during the history pass, so no bandwidth goes to orphans. Keeping losing branches is not free: their cones overlap the canonical cone only partly. Measured on history from before library upgrade 7 (section 8.2.1), each losing branch brought about 3.6 transactions of its own that no canonical cone holds.
 - Once the walk reaches the present, live pushes have usually delivered everything already and the walker only links.
 
 **Pull policy, in order:**
@@ -193,7 +193,7 @@ Branch `b` is sealed when its predecessor is sealed, its cone walk is complete, 
 
 A transaction at slot `s` that is not kept (in no stored branch's cone), once the canonical tip is past `s + OrphanPurgeSlots`, is deleted with its edges. Junk that parsed but was never included goes the same way, and so do milestones that no branch consolidated.
 
-**Branches are never purged (decided).** Every branch, canonical or not, stays with its cone, sealed by the same rule, for analysis of branch competition ([`kb/research/split_slots.md`](https://github.com/lunfardo314/proxima/blob/develop/kb/research/split_slots.md) and `branch-bias.md` needed exactly that). On the network measured in November 2026, about five branches were produced per slot, so about four losing branches per slot.
+**Branches are never purged (decided).** Every branch, canonical or not, stays with its cone, sealed by the same rule, for analysis of branch competition ([`kb/research/split_slots.md`](https://github.com/lunfardo314/proxima/blob/develop/kb/research/split_slots.md) and `branch-bias.md` needed exactly that). Measured on history of November 2026 from before library upgrade 7 (section 8.2.1), about 86 branches were produced per slot, nearly every sequencer branching every slot, so about 85 losing branches per slot; since upgrade 7 branching needs 20,000 PROX of own capital or 100,000 of coverage, so fewer are expected. What keeping them costs is measured in section 8.2.1 and reopened in section 13.
 
 `OrphanPurgeSlots` must exceed the longest delay with which a transaction can still enter a later canonical cone. Assumption to verify: node policy bounds that by the non-branch txID retention (`TxIDStateTTLSlots`, default 60, [`ledger/def_constants0.go`](https://github.com/lunfardo314/proxima/blob/develop/ledger/def_constants0.go)).
 
@@ -266,12 +266,12 @@ Every transaction gets a small integer id (the SQLite rowid) and every edge refe
 
 | Table | Columns | Notes |
 |-------|---------|-------|
-| `tx` | `id` (rowid), `txid` UNIQUE, `slot`, `tick`, `kind` (branch / sequencer / plain / mining), `sequencer` (chain id), `size`, `state` (missing / lost / intake / linked), `kept`, `confirming_branch` (null if on no canonical cone), `sig_checked`, `parsed`, `source` (push / pull / broad / import), `received_at` | txids begin with the timestamp, so inserts land at the end of the txid index; index on `(sequencer, slot)` |
+| `tx` | `id` (rowid), `txid` UNIQUE, `slot`, `tick`, `kind` (branch / sequencer / plain / mining), `sequencer` (chain id), `baseline` (the explicit baseline, an edge of the cone walk too), `size`, `state` (missing / lost / intake / linked), `kept`, `confirming_branch` (null if on no canonical cone), `sig_checked`, `parsed`, `source` (push / pull / broad / import), `received_at` | txids begin with the timestamp, so inserts land at the end of the txid index; index on `(sequencer, slot)` |
 | `tx_bytes` | `id`, `bytes` | Separate, so index scans stay small; a rowid table keeps blobs up to about 4 KB inline in a 4 KB page, larger ones spill to overflow pages |
 | `input` | `tx`, `idx`, `producer`, `out_idx` | Consumption edges; index on `(producer, out_idx)` for "who spent this output" |
 | `endorsement` | `tx`, `idx`, `endorsed` | Index on `endorsed` |
 | `output` | `tx`, `idx`, `amount`, `lock_kind`, `account`, `chain` | Parsed with `txbuildercore` (`ClassifyChain`, lock classifiers); indexes on `account`, `chain` |
-| `account`, `chain` | `id`, holder ID or chain ID UNIQUE, chain kind | Dictionaries, so outputs carry integers |
+| `account`, `chain`, `lock_kind` | `id`, holder ID, chain ID or lock name UNIQUE, chain kind | Dictionaries, so outputs carry integers |
 | `branch` | `tx`, `slot`, `sequencer`, `predecessor`, `total_coverage`, `total_supply`, `slot_inflation`, `canonical_no` (null if not canonical), `fork` (null if canonical), `sealed`, `gaps` | The branch table: every branch known, canonical or not |
 | `fork` | `id`, `tip`, `fork_point`, `length`, `sealed_tip` | One row per non-canonical tip; normally length 1 |
 | `missing` | `tx`, `referenced_by`, `first_needed`, `tried` | Retry bookkeeping for placeholder rows |
@@ -303,6 +303,28 @@ With 32-byte txids in every edge instead of integer ids, the total is about 2.3 
 Check against real history (November 2026): the txstore of a node running since genesis held 71 GB after about 35 days, about 2 GB a day, below the 2.9 GB a day of raw bytes the load above would give, as expected since the load was lower earlier. For the dagstore: about two thirds of it is kept (32 of 50 transactions), so about 45 GB of raw bytes, about 85 GB with the tables and indexes above. That whole history fits a single SQLite file comfortably.
 
 Only kept transactions count: the orphans (today about a third of what is stored) are purged. Writes are no problem at these rates: 100 TPS is about 1,500 rows a second, which SQLite does easily in batched transactions.
+
+#### 8.2.1 Measured
+
+The offline import prototype (`cmd/dagstore-import`) loaded the txstore of an access node of the November 2026 network: 10.1 M transactions, 6.75 GB of raw bytes, 11,977 slots (about 1.4 days, before library upgrade 7), an unbroken canonical lineage over all of them, 1.03 M branches.
+
+- **Kept:** 9.49 M transactions, 94% of what was stored; 5.78 M of them are in a canonical cone, 3.71 M (39% of the kept, 2.66 GB of raw bytes) only in the cone of some losing branch. Only 6% were orphans.
+- **What was kept:** 8.45 M sequencer transactions, 1.03 M branches, 11 k mining transits, 5 k others. 1.11 inputs, 1.92 endorsements and 1.11 outputs per kept transaction on average.
+- **Size:** 10.8 GB, **1,142 bytes per kept transaction**, against the estimate of about 1.5 KB:
+
+| Part | Bytes per kept transaction |
+|------|----------------------------|
+| raw bytes in `tx_bytes` (671 of payload, 16% of its pages unused) | 849 |
+| `tx` row and txid index | 118 |
+| inputs and endorsements, rows and indexes | 97 |
+| outputs, rows and account and chain indexes | 52 |
+| sequencer index | 16 |
+| branch and fork tables | 9 |
+
+  Edges and outputs cost far less than estimated, because nearly every transaction is a sequencer milestone with few outputs. The raw bytes are the size. The node's own Badger txstore held all 10.1 M transactions in 4.8 GB on disk, compressed, against the 10.8 GB here: compressing `tx_bytes` (for example zstd with a dictionary trained on transactions) is the first thing to try if size matters.
+- **Rate:** at the load of that period, 6.7 M kept transactions a day, about 7.6 GB a day, about 2.8 TB a year; with canonical cones only, about 4.6 GB a day.
+- **Checks:** every one of the 9.49 M signatures verified with the plain ed25519 check over the txid (section 5.3); no parse failure, no txid mismatch. 123 producers were missing, all in losing branches' cones: every canonical branch sealed, 105 losing branches did not.
+- **Speed:** the cone walk ran at about 5,100 kept transactions a second on one core (31 minutes), with 10 GB of memory, most of it the in-memory map from txid to row id.
 
 **One file for now (decided).** Today's history is about 85 GB; at 50 TPS the file grows by about 2.4 TB a year, so one file serves for many months.
 
@@ -402,11 +424,13 @@ Metrics on the dagstore: intake rate, copies per feeder, history walker slot, se
 
 ## 13. Open questions
 
-None open. Decided on 2026-11-22:
+**Open: the cones of losing branches.** Section 8.2.1 found 86 branches per slot on history before library upgrade 7, and their cones adding 39% to the kept transactions. The choices: keep them as decided; keep every losing branch's own transaction but not the part of its cone outside canonical history, recorded as placeholders of a new state; or decide after measuring history after upgrade 7, where fewer branches are expected.
+
+Decided on 2026-11-22:
 
 - role advertisement through the heartbeat (section 5.1);
 - one trusted announcement is enough before a node deletes (section 7.2);
-- every branch kept and sealed (sections 6.5, 6.6);
+- every branch kept and sealed (sections 6.5, 6.6), reopened above for the cost of their cones;
 - libraries fetched with their proof and checked against the build; a dagstore not upgraded stops at the first transaction version it does not know, and nodes keep everything meanwhile (section 7.1);
 - one SQLite file, created with incremental auto-vacuum so it can be pruned and split later (section 8.2); the prototype loading real history is the first implementation milestone;
 - tip and branch table over peering only, no node API; a lineage is canonical only from `CanonicalDepthSlots`, at least 64, behind the LRB (section 6.2).

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ type Config struct {
 	MaxLimit      int             `json:"max_limit"`
 	MaxConeLimit  int             `json:"max_cone_limit"` // vertices of one cone traversal
 	StatsInterval time.Duration   `json:"stats_interval"`
+	SlowRequest   time.Duration   `json:"slow_request"` // a request taking longer is logged
 	Params        dagstore.Params `json:"params"`
 }
 
@@ -42,6 +44,7 @@ var DefaultConfig = Config{
 	MaxLimit:      1000,
 	MaxConeLimit:  10000,
 	StatsInterval: 10 * time.Minute,
+	SlowRequest:   2 * time.Second,
 	Params:        dagstore.DefaultParams,
 }
 
@@ -62,7 +65,9 @@ func (s *Server) Handler() http.Handler {
 	handle := func(pattern string, h func(w http.ResponseWriter, r *http.Request) error) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			if err := h(w, r); err != nil {
-				writeError(w, err)
+				if writeError(w, err) >= 500 {
+					slog.Error("request failed", "path", r.URL.RequestURI(), "err", err)
+				}
 			}
 		})
 	}
@@ -85,7 +90,7 @@ func (s *Server) Handler() http.Handler {
 	dag_explorer.Register(func(path string, h func(http.ResponseWriter, *http.Request)) {
 		mux.HandleFunc("GET "+path, h)
 	}, &explorerStore{db: s.db})
-	return mux
+	return s.logRequests(mux)
 }
 
 // httpError carries the status code of a client error; anything else is a 500.
@@ -104,7 +109,8 @@ func notFound(format string, args ...any) error {
 	return &httpError{http.StatusNotFound, fmt.Sprintf(format, args...)}
 }
 
-func writeError(w http.ResponseWriter, err error) {
+// writeError writes the error as JSON and returns the status code it chose.
+func writeError(w http.ResponseWriter, err error) int {
 	code := http.StatusInternalServerError
 	var he *httpError
 	switch {
@@ -119,6 +125,7 @@ func writeError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	return code
 }
 
 func writeJSON(w http.ResponseWriter, v any) error {

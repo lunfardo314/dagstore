@@ -7,7 +7,8 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -206,11 +207,15 @@ func (s *Server) RunStats(ctx context.Context, libs []LibraryInfo) {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("stats: %v", err)
+			slog.Warn("stats snapshot failed", "err", err)
 		} else {
-			snap.Took = time.Since(t).Round(time.Millisecond).String()
+			took := time.Since(t).Round(time.Millisecond)
+			snap.Took = took.String()
 			snap.Libraries = libs
 			s.stats.Store(snap)
+			slog.Info("stats", "stored", snap.Tx.ByState["linked"].Count, "confirmed", snap.Tx.Confirmed,
+				"branches", snap.Branches.Total, "missing", snap.Missing.Pending, "lost", snap.Missing.Lost,
+				"file", fmt.Sprintf("%.1fGB", float64(snap.Database.FileBytes)/1e9), "took", took)
 		}
 		select {
 		case <-ctx.Done():

@@ -41,6 +41,8 @@ go build -o dagstore ./cmd/dagstore
 ./dagstore -db history.db -listen 127.0.0.1:8090
 ```
 
+It logs to standard error: startup, a stats line every 10 minutes, server errors and requests slower than 2 s (`-slow_request`); `-log_level debug` adds every request.
+
 The dashboard is at `http://127.0.0.1:8090/`, the DAG explorer at `/dag_explorer`, and the API endpoints are listed in [SPEC.md](SPEC.md), section 11.
 
 The dagstore depends on Proxima, never the other way round, and `go.mod` pins the exact Proxima commit it is built against ([SPEC.md](SPEC.md), section 2.3). To work on both at once, point the build at a local Proxima checkout with an untracked workspace file: `go work init . <path to proxima>`.

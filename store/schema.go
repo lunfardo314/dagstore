@@ -46,6 +46,32 @@ const (
 	ChainMine       = 3
 )
 
+// Names of the codes above, as the query API shows them.
+var (
+	KindNames      = []string{"plain", "sequencer", "branch", "mining"}
+	StateNames     = []string{"linked", "intake", "missing", "lost", "pruned"}
+	SourceNames    = []string{"push", "pull", "broad", "import"}
+	ChainKindNames = []string{"other", "sequencer", "delegation", "mine"}
+)
+
+// Name returns names[code], or "" for a NULL or unknown code.
+func Name(names []string, code sql.NullInt64) string {
+	if !code.Valid || code.Int64 < 0 || code.Int64 >= int64(len(names)) {
+		return ""
+	}
+	return names[code.Int64]
+}
+
+// Code returns the code of name in names, or -1.
+func Code(names []string, name string) int {
+	for i, n := range names {
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // Every id is an integer rowid, so edges and indexes carry 8 bytes at most instead of 32-byte txids.
 // The edge and output tables are WITHOUT ROWID: their primary key is the row, so they hold no
 // second copy of it.
@@ -194,5 +220,19 @@ func Open(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// OpenReadOnly opens a database for queries, with a pool of connections: in WAL mode readers run
+// beside the writer and beside each other.
+func OpenReadOnly(path string, conns int) (*sql.DB, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(10000)&_pragma=query_only(1)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(conns)
 	return db, nil
 }

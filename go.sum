@@ -22,6 +22,8 @@ github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHk
 github.com/frankban/quicktest v1.14.6/go.mod h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0=
 github.com/fsnotify/fsnotify v1.10.1 h1:b0/UzAf9yR5rhf3RPm9gf3ehBPpf0oZKIjtpKrx59Ho=
 github.com/fsnotify/fsnotify v1.10.1/go.mod h1:TLheqan6HD6GBK6PrDWyDPBaEV8LspOxvPSjC+bVfgo=
+github.com/gammazero/deque v1.2.1 h1:9fnQVFCCZ9/NOc7ccTNqzoKd1tCWOqeI05/lPqFPMGQ=
+github.com/gammazero/deque v1.2.1/go.mod h1:5nSFkzVm+afG9+gy0VIowlqVAW4N8zNcMne+CMQVD2g=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
@@ -56,6 +58,8 @@ github.com/libp2p/go-libp2p v0.48.0 h1:h2BrLAgrj7X8bEN05K7qmrjpNHYA+6tnsGRdprjTn
 github.com/libp2p/go-libp2p v0.48.0/go.mod h1:Q1fBZNdmC2Hf82husCTfkKJVfHm2we5zk+NWmOGEmWk=
 github.com/lunfardo314/easyfl v0.0.0-20261118074206-93f1327a29da h1:EX0mgmgu4HEp9gtz7j1dbEIPV4Jsf8AAH6nfMPWeL0M=
 github.com/lunfardo314/easyfl v0.0.0-20261118074206-93f1327a29da/go.mod h1:XjGR4UuUPDdBV1w/aKqoQjVsUj6wJAZhHhaZPWXH2MY=
+github.com/lunfardo314/proxima v1.7.6-0.20261122170922-e97c869d5d3f h1:9vei2Kvb6gFngzE24mCvEKLnufXFuoZRLRKYPyCCoW8=
+github.com/lunfardo314/proxima v1.7.6-0.20261122170922-e97c869d5d3f/go.mod h1:vJgwOPTdk52h6Z6QHIZzjVATNgrNf2TQAPzj5ivaU+M=
 github.com/lunfardo314/unitrie v0.0.0-20261118094029-1b2fa7867ece h1:Ob5n7s9oX4HYQU/GrpyVGCtCEb5oENwQ8nFcimhjlzw=
 github.com/lunfardo314/unitrie v0.0.0-20261118094029-1b2fa7867ece/go.mod h1:69UhxzxQ7UVhI9Knv50D/uVxsJseC7myW1DUlWelSo4=
 github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=

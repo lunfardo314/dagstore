@@ -9,7 +9,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/lunfardo314/dagstore"
 	"github.com/lunfardo314/dagstore/store"
 	"github.com/lunfardo314/proxima/ledger"
 	"github.com/lunfardo314/proxima/ledger/base"
@@ -32,19 +32,29 @@ func main() {
 	txstorePath := flag.String("txstore", "", "node txstore directory (proximadb.txstore); opened read-only")
 	statePath := flag.String("state", "", "node state directory (proximadb), for the libraries; use a copy, opening it may write")
 	outPath := flag.String("out", "", "new SQLite database file")
+	librariesInto := flag.String("libraries_into", "", "existing dagstore database: only write the libraries of -state into it")
 	depth := flag.Int("depth", 120, "canonical depth: slots between the newest branch and the canonical tip")
 	commitEvery := flag.Int("commit_every", 20, "branches per SQLite transaction")
 	flag.Parse()
-	if *txstorePath == "" || *statePath == "" || *outPath == "" {
+	log.Print(dagstore.BannerString())
+	if *statePath == "" || (*librariesInto == "" && (*txstorePath == "" || *outPath == "")) {
 		flag.Usage()
 		os.Exit(2)
 	}
 
-	stateDB := badger_adaptor.MustCreateOrOpenBadgerDB(*statePath)
-	if err := multistate.InitLedgerFromStore(badger_adaptor.New(stateDB), log.Printf); err != nil {
-		log.Fatalf("libraries: %v", err)
+	libs := loadLibraries(*statePath)
+	if *librariesInto != "" {
+		db, err := store.Open(*librariesInto)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err = store.SaveLibraries(db, libs); err != nil {
+			log.Fatalf("libraries: %v", err)
+		}
+		_ = db.Close()
+		log.Printf("%d libraries written into %s", len(libs), *librariesInto)
+		return
 	}
-	_ = stateDB.Close()
 
 	opts := badger.DefaultOptions(*txstorePath).WithReadOnly(true).WithLogger(nil)
 	txDB, err := badger.Open(opts)
@@ -59,6 +69,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+	if err = store.SaveLibraries(db, libs); err != nil {
+		log.Fatalf("libraries: %v", err)
+	}
 
 	im := &importer{src: src, db: db, ids: make(map[base.TransactionID]*node), commitEvery: *commitEvery}
 	t0 := time.Now()
@@ -403,7 +416,9 @@ func (im *importer) insert(n *node, tx *transaction.Transaction, canonical bool,
 	} else {
 		n.state = nodeKept
 	}
-	sigOK := verifySignature(tx)
+	// the dagstore's only check of content beyond parsing: the txid does not cover the signature
+	_, sigErr := tx.VerifySignature()
+	sigOK := sigErr == nil
 	if !sigOK {
 		im.stats.sigFailed++
 	}
@@ -614,15 +629,23 @@ func sequencerID(tx *transaction.Transaction) (ret base.ChainID, ok bool) {
 	return
 }
 
-// verifySignature is the dagstore's only check of a transaction's content beyond parsing: the
-// signature signs the txid, which does not cover the signature, so parsing alone does not show it.
-func verifySignature(tx *transaction.Transaction) bool {
-	sig, err := tx.Signature()
-	if err != nil || sig.SignatureType != base.SignatureTypeED25519 {
-		return false
+// loadLibraries initialises the ledger libraries from the node's state database and returns every
+// one of them for the library table, so the dagstore database parses without the state.
+func loadLibraries(statePath string) []store.Library {
+	stateDB := badger_adaptor.MustCreateOrOpenBadgerDB(statePath)
+	defer func() { _ = stateDB.Close() }()
+	stateStore := badger_adaptor.New(stateDB)
+	if err := multistate.InitLedgerFromStore(stateStore, log.Printf); err != nil {
+		log.Fatalf("libraries: %v", err)
 	}
-	txid := tx.ID()
-	return ed25519.Verify(sig.MustPubicKeyED25519(), txid[:], sig.MustSignatureDataED25519())
+	var ret []store.Library
+	multistate.IterateUpgradeLibraries(stateStore, func(slot uint32, libJSON []byte) bool {
+		lib := ledger.L(slot)
+		h := lib.LibraryHash()
+		ret = append(ret, store.Library{UpgradeIndex: lib.UpgradeIndex(), ActivationSlot: slot, Hash: h[:], JSON: libJSON})
+		return true
+	})
+	return ret
 }
 
 func boolInt(b bool) int {

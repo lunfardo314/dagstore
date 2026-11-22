@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAGStore</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d232b; --muted: #66707c; --line: #e2e6eb;
+  --accent: #2f6fd0; --ok: #1f8a4c; --warn: #b7791f; --bad: #c53030; --bar: #c9d8f2;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11151a; --panel: #1a2027; --text: #e3e8ee; --muted: #8b96a3; --line: #2a323c;
+    --accent: #6ea2f0; --ok: #4cc283; --warn: #e0a84a; --bad: #f07272; --bar: #2c4468; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+header .mode { color: var(--muted); }
+header nav { margin-left: auto; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+header input { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); width: 260px; max-width: 100%; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+main { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; padding: 16px; max-width: 1500px; margin: 0 auto; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+section.wide { grid-column: 1 / -1; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+td, th { padding: 3px 0; vertical-align: top; text-align: left; }
+th { color: var(--muted); font-weight: normal; padding-right: 12px; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); font-weight: 600; }
+.bar { position: relative; }
+.bar span.fill { position: absolute; inset: 2px auto 2px 0; background: var(--bar); border-radius: 2px; z-index: 0; }
+.bar span.txt { position: relative; z-index: 1; }
+.note { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
+footer { color: var(--muted); font-size: 12px; padding: 0 16px 16px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DAGStore <span class="mode" id="version"></span></h1>
+  <span class="mode" id="mode">loading…</span>
+  <nav>
+    <input id="q" placeholder="txid, slot-tick-hash or slot" aria-label="Find a transaction or slot">
+    <a href="/dag_explorer">DAG explorer</a>
+    <a href="/status">/status</a>
+    <a href="/stats">/stats</a>
+  </nav>
+</header>
+<main>
+  <section>
+    <h2>Sync progress</h2>
+    <table id="sync"></table>
+  </section>
+  <section>
+    <h2>Where the store stands</h2>
+    <table id="where"></table>
+  </section>
+  <section>
+    <h2>Branches and forks</h2>
+    <table id="branches"></table>
+  </section>
+  <section>
+    <h2>Transactions</h2>
+    <table id="txs"></table>
+  </section>
+  <section>
+    <h2>Gaps</h2>
+    <table id="gaps"></table>
+  </section>
+  <section>
+    <h2>Feeders and replicas</h2>
+    <table id="feeders"></table>
+  </section>
+  <section>
+    <h2>Intake and pulls</h2>
+    <table id="intake"></table>
+  </section>
+  <section>
+    <h2>Database</h2>
+    <table id="db"></table>
+  </section>
+  <section>
+    <h2>Size by table</h2>
+    <table id="tables"></table>
+  </section>
+  <section class="wide">
+    <h2>Libraries</h2>
+    <table id="libs"></table>
+  </section>
+  <section class="wide">
+    <h2>Main parameters</h2>
+    <table id="params"></table>
+  </section>
+</main>
+<footer id="footer"></footer>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const num = n => n == null ? "—" : Number(n).toLocaleString("en-US");
+const bytes = n => {
+  if (n == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0, v = Number(n);
+  while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+  return (i ? v.toFixed(v < 10 ? 2 : 1) : v) + " " + u[i];
+};
+const pct = (a, b) => b ? (100 * a / b).toFixed(1) + "%" : "—";
+const txLink = (txid, short) => `<a class="mono" href="/tx/${esc(txid)}">${esc(short || txid.slice(0, 16) + "…")}</a>`;
+const rows = (el, list) => { $(el).innerHTML = list.map(([k, v, cls]) =>
+  `<tr><th>${esc(k)}</th><td class="${cls || ""}">${v}</td></tr>`).join(""); };
+const notRunning = '<span class="muted">not running</span>';
+
+function point(p) {
+  if (!p) return '<span class="muted">—</span>';
+  const no = p.canonical_no ? ` <span class="muted">#${num(p.canonical_no)}</span>` : "";
+  return `${txLink(p.txid, p.short)}${no}<br><span class="muted">slot ${num(p.slot)}, ${num(p.lag_slots)} slots (${esc(p.lag)}) behind</span>`;
+}
+
+function renderStatus(st) {
+  $("mode").textContent = st.mode;
+  $("version").textContent = st.version;
+  $("version").title = "commit " + st.commit_hash + ", " + st.commit_time;
+  rows("where", [
+    ["Starting branch", point(st.starting_branch)],
+    ["Newest sealed canonical", point(st.newest_sealed_canonical)],
+    ["Canonical tip", point(st.canonical_tip)],
+    ["Feeders' LRB", point(st.feeders_lrb)],
+    ["Current slot", num(st.current_slot)],
+  ]);
+  const walker = st.history_walker_slot;
+  const tip = st.canonical_tip ? st.canonical_tip.slot : null, start = st.starting_branch ? st.starting_branch.slot : null;
+  rows("sync", [
+    ["Branch table fetch", notRunning],
+    ["History walker", walker == null ? notRunning :
+      `slot ${num(walker)}, ${pct(walker - start, tip - start)} of the way to the canonical tip`],
+    ["Canonical lineage held", start == null ? "—" : `slots ${num(start)} … ${num(tip)} (${num(tip - start + 1)} slots)`],
+  ]);
+  rows("feeders", st.feeders.length ? st.feeders.map(f => [f, ""]) :
+    [["Feeders", '<span class="muted">none declared</span>'], ["Replicas", '<span class="muted">none declared</span>']]);
+  rows("intake", [
+    ["Intake (unlinked)", num(st.intake)],
+    ["Pushes per second", notRunning],
+    ["Copies dropped", notRunning],
+    ["Pulls per second", notRunning],
+    ["Timeouts, broad pulls", notRunning],
+  ]);
+  $("footer").textContent = `up ${st.uptime}` + (st.stats_at ? `, stats of ${new Date(st.stats_at).toLocaleString()}` : ", stats being computed");
+}
+
+function renderStats(s) {
+  const t = s.tx, b = s.branches, f = s.forks, m = s.missing, d = s.database;
+  const stored = (t.by_state.linked || {}).count || 0;
+  rows("branches", [
+    ["Branches stored", num(b.total)],
+    ["Canonical", num(b.canonical)],
+    ["Sealed", `${num(b.sealed)} <span class="muted">(${pct(b.sealed, b.total)}; canonical ${num(b.sealed_canonical)})</span>`],
+    ["Sealed with gaps", num(b.with_gaps), b.with_gaps ? "warn" : ""],
+    ["Forks of length 1", `${num(f.length_1)} <span class="muted">(branches that lost their slot)</span>`],
+    ["Forks longer than 1", `<a href="/forks?min_length=2">${num(f.longer)}</a> <span class="muted">(longest ${num(f.max_length)})</span>`],
+  ]);
+  const kinds = Object.entries(t.by_kind).sort((x, y) => y[1].count - x[1].count);
+  rows("txs", [
+    ["Stored", `${num(stored)} <span class="muted">(${bytes((t.by_state.linked || {}).bytes)} raw)</span>`],
+    ["Confirmed", `${num(t.confirmed)} <span class="muted">(${pct(t.confirmed, stored)}; the rest only in losing branches' cones)</span>`],
+    ...kinds.map(([k, v]) => [`  ${k}`, `${num(v.count)} <span class="muted">(${pct(v.count, stored)})</span>`]),
+    ["Accounts, chains", `${num(s.dictionaries.accounts)}, ${Object.entries(s.dictionaries.chains).map(([k, v]) => `${num(v)} ${k}`).join(", ")}`],
+  ]);
+  rows("gaps", [
+    ["Missing, pending", `<a href="/missing?state=missing">${num(m.pending)}</a>`, m.pending ? "warn" : "ok"],
+    ["Lost", `<a href="/missing?state=lost">${num(m.lost)}</a>`, m.lost ? "bad" : "ok"],
+    ["Oldest pending", m.oldest_pending_slot == null ? "—" : "slot " + num(m.oldest_pending_slot)],
+    ["Branches sealed with gaps", num(b.with_gaps)],
+    ["Pruned placeholders", num((t.by_state.pruned || {}).count || 0) + ' <span class="muted">(below the starting branch)</span>'],
+  ]);
+  rows("db", [
+    ["File", `${bytes(d.file_bytes)} <span class="muted">+ WAL ${bytes(d.wal_bytes)}</span>`],
+    ["Per stored transaction", Math.round(d.bytes_per_stored_tx) + " B"],
+    ["History held", d.history_days.toFixed(2) + " days"],
+    ["Per day of history", bytes(d.bytes_per_history_day) + ` <span class="muted">(${bytes(d.bytes_per_history_day * 365)} a year)</span>`],
+    ["Free pages", `${num(d.free_pages)} <span class="muted">(${bytes(d.free_pages * d.page_size)} awaiting incremental vacuum)</span>`],
+    ["Disk free", bytes(d.disk_free_bytes)],
+    ["Archive segments", '<span class="muted">none (nothing pruned)</span>'],
+  ]);
+  const max = Math.max(...d.tables.map(x => x.bytes), 1);
+  $("tables").innerHTML = d.tables.filter(x => x.bytes >= 1e6).map(x =>
+    `<tr><th class="mono">${esc(x.name)}</th><td class="n bar"><span class="fill" style="width:${(100 * x.bytes / max).toFixed(1)}%"></span>` +
+    `<span class="txt">${bytes(x.bytes)}</span></td><td class="n muted">${stored ? Math.round(x.bytes / stored) + " B/tx" : ""}</td></tr>`).join("") +
+    '<tr><td colspan="3" class="note">tables and indexes under 1 MB not shown</td></tr>';
+  $("libs").innerHTML = "<tr><th>Upgrade</th><th>From slot</th><th>Hash</th><th>Against this build</th></tr>" + s.libraries.map(l => {
+    const cls = l.check.startsWith("ALARM") ? "bad" : l.check.startsWith("matches") || l.check === "genesis" ? "ok" : "warn";
+    return `<tr><td>${l.upgrade_index}</td><td class="n">${num(l.activation_slot)}</td><td class="mono">${esc(l.hash.slice(0, 16))}…</td><td class="${cls}">${esc(l.check)}</td></tr>`;
+  }).join("");
+  const p = s.config.params, c = s.config, dur = ns => (ns / 1e9) + " s";
+  rows("params", [
+    ["CanonicalDepthSlots", num(p.canonical_depth_slots)],
+    ["OrphanPurgeSlots", num(p.orphan_purge_slots)],
+    ["BranchListMaxSlots", num(p.branch_list_max_slots)],
+    ["Pull budget", `${p.history_pulls_per_second}/s overall, ${p.pulls_per_second_per_feeder}/s per feeder, ${p.source_pulls_per_second}/s from a dagstore source, broad ${p.broad_pull_per_second}/s`],
+    ["PullTimeout, HeartbeatPeriod", `${dur(p.pull_timeout)}, ${dur(p.heartbeat_period)}`],
+    ["Missing retries", `${p.missing_retry_rounds} rounds, ${dur(p.missing_retry_interval)} apart`],
+    ["Query API limits", `${dur(c.query_timeout)} per request, ${num(c.max_range_slots)} slots per range, ${num(c.max_limit)} rows per page, ${num(c.max_cone_limit)} vertices per cone`],
+    ["Database", `<span class="mono">${esc(c.db_path)}</span>`],
+  ]);
+  $("params").insertAdjacentHTML("beforeend", '<tr><td colspan="2" class="note">The sync parameters take effect once the live modules run; this process only serves the database.</td></tr>');
+}
+
+async function refresh() {
+  try {
+    const st = await (await fetch("/status")).json();
+    renderStatus(st);
+    const r = await fetch("/stats");
+    if (r.ok) renderStats(await r.json());
+  } catch (e) {
+    $("mode").textContent = "cannot reach the dagstore: " + e;
+  }
+}
+
+$("q").addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  const v = e.target.value.trim();
+  if (/^\d+$/.test(v)) location.href = "/slot/" + v;
+  else if (v) location.href = "/tx/" + encodeURIComponent(v);
+});
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

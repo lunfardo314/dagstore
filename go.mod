@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/dgraph-io/badger/v4 v4.9.4
-	github.com/lunfardo314/proxima v0.0.0
+	github.com/lunfardo314/proxima v1.7.6-0.20261122170922-e97c869d5d3f
 	github.com/lunfardo314/unitrie v0.0.0-20261118094029-1b2fa7867ece
 	modernc.org/sqlite v1.62.0
 )
@@ -18,6 +18,7 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
+	github.com/gammazero/deque v1.2.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
@@ -75,6 +76,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
-
-// Development against the local feat/dagstore checkout; pin a proxima commit before any release.
-replace github.com/lunfardo314/proxima => ../proxima/.claude/worktrees/dagstore

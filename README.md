@@ -18,7 +18,10 @@ The full design is in [SPEC.md](SPEC.md).
 
 ## Status
 
-Early development. What exists is an offline importer: it reads the transaction store of a stopped Proxima node and writes the history it holds into a new dagstore database, to test the database design and measure its size on real data (results in [SPEC.md](SPEC.md), section 8.2.1). The dagstore node itself is not built yet.
+Early development. Two programs exist:
+
+- `dagstore-import`, an offline importer: it reads the transaction store of a stopped Proxima node and writes the history it holds into a new dagstore database, to test the database design and measure its size on real data (results in [SPEC.md](SPEC.md), section 8.2.1).
+- `dagstore`, which serves such a database read-only: the query API, a dashboard, and Proxima's DAG explorer pages. Receiving transactions from nodes, following the network and sealing history are not built yet.
 
 ## How to run
 
@@ -29,7 +32,18 @@ go build -o dagstore-import ./cmd/dagstore-import
 ./dagstore-import -txstore <node dir>/proximadb.txstore -state <node dir>/proximadb -out history.db
 ```
 
-It prints what it found and the size of every table. During development the module builds against a local checkout of the Proxima repository (the `replace` line in `go.mod`).
+It prints what it found and the size of every table. It also stores the ledger's libraries in the database, so the database can be read without the node. For a database imported before that, `-libraries_into history.db` (with `-state`) adds them.
+
+Serving a database:
+
+```
+go build -o dagstore ./cmd/dagstore
+./dagstore -db history.db -listen 127.0.0.1:8090
+```
+
+The dashboard is at `http://127.0.0.1:8090/`, the DAG explorer at `/dag_explorer`, and the API endpoints are listed in [SPEC.md](SPEC.md), section 11.
+
+The dagstore depends on Proxima, never the other way round, and `go.mod` pins the exact Proxima commit it is built against ([SPEC.md](SPEC.md), section 2.3). To work on both at once, point the build at a local Proxima checkout with an untracked workspace file: `go work init . <path to proxima>`.
 
 ## License
 

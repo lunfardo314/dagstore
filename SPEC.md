@@ -1,6 +1,6 @@
 # DAGStore — long-term storage of the tangle history
 
-> **DRAFT** 2026-11-22, revision 6 (deployment-neutral, for publication with the `dagstore` repository). Nothing built. Separate repository `dagstore`, depending on `proxima` for code. Proxima-side changes are listed in section 10 and need their own `feat/` branch.
+> **DRAFT** 2026-11-22, revision 7 (deployment-neutral, for publication with the `dagstore` repository). Built so far: the offline importer (section 8.2.1) and the read-only query API with the dashboard (section 11.2); no intake, sync or sealing yet. Separate repository `dagstore`, depending on `proxima` for code, never the other way round (hard constraint, section 2.3). Proxima-side changes are listed in section 10 and need their own `feat/` branch.
 
 ## 1. Problem
 
@@ -23,6 +23,18 @@ A special node, the **dagstore**, that keeps the canonical DAG from genesis (or 
 ### 2.2 Not
 
 Not a consensus participant, no ledger state, no sequencer, no attacher, no memDAG. **It does not relay gossip.** It does not use the node's forward sync module or the ledger state of any node (section 6.1).
+
+### 2.3 Dependency direction (hard constraint)
+
+**The dagstore depends on proxima; proxima never depends on the dagstore.** No proxima package, test or tool imports a dagstore package, and proxima's `go.mod` never names the `dagstore` module. What both sides need (the peering messages and their handlers, the cone walker, the signature check, the in-gate) lives in proxima and is used by the dagstore. A proxima change made for the dagstore is general and behind config, so a node that declares no dagstore behaves as before (section 10).
+
+**The two repositories move in lockstep.** The dagstore's `go.mod` pins the exact proxima commit it is built and tested against, with no `replace` directive:
+
+- a proxima change the dagstore needs is pushed first, on proxima's `feat/dagstore` branch;
+- the dagstore commit that uses it moves the pin to that commit, in the same commit;
+- once `feat/dagstore` is merged into proxima's `develop`, the pin moves to a `develop` commit.
+
+Working on both at once, an untracked `go.work` in the dagstore checkout points the build at a local proxima checkout; before a dagstore commit, it builds and tests with `GOWORK=off`, against the pinned commit.
 
 ## 3. Vocabulary
 
@@ -159,8 +171,19 @@ The request reads only the txstore, never ledger state, so it reaches as far bac
 
 The tip and the branch table come over the pull protocol between mutually trusted peers, not over any node API: sequencer node APIs stay closed, nothing is opened to the dagstores' addresses, and every feeder serves its own txstore, sequencer nodes included. The pull protocol already starts each message with a type byte (`PullTransactions` is type 0, [`peering/pull.go`](https://github.com/lunfardo314/proxima/blob/develop/peering/pull.go)); two request types join it:
 
-- `PullLRB` → the feeder's LRB branch txid;
-- `PullBranchList(from_slot, to_slot)` → the list of (branch txid, predecessor txid) pairs, in one or more reply messages within `MaxPayloadSize` (about 64 KB, 66 bytes an entry).
+- `PullLRB` → the feeder's LRB branch txid, its oldest txstore slot and its purge floor;
+- `PullBranchList(from_slot, to_slot)` → the list of (branch txid, predecessor txid) pairs, in one or more reply messages.
+
+Wire layouts ([`peering/dagstore.go`](https://github.com/lunfardo314/proxima/blob/develop/peering/dagstore.go)), integers big-endian, the first byte the message type:
+
+| Type | Message | Layout |
+|------|---------|--------|
+| 1 | `PullLRB` | `[1]` |
+| 2 | `PullBranchList` | `[2] from u32 \| to u32`, at most `BranchListMaxSlots` (150) slots |
+| 3 | LRB reply | `[3] LRB txid (32) \| oldest txstore slot u32 \| purge floor u32` |
+| 4 | branch list reply | `[4] from u32 \| to u32 \| last u8 \| N × (branch txid, predecessor txid)`, 64 bytes an entry, at most `MaxBranchListEntries` (1023) per message; a range takes several messages, `last` = 1 on the final one |
+
+Replies go back on the feeder's own pull stream. A feeder answers requests only from its trusted dagstores, and a dagstore takes replies only from its feeders.
 
 A feeder answers them only to peers it declared as trusted dagstores, at the same per-stream pace as transaction pulls. The only HTTP calls the dagstore makes are for the ledger identity and the libraries (section 7.1), and those go to the public access nodes: both come with their proof, so nothing in them rests on trusting the node that serves them.
 
@@ -235,7 +258,9 @@ Nothing is lost while it waits. Nodes delete only below the announced sealed bra
 
 ### 7.2 Purging the nodes' txstore
 
-**Heartbeat.** Every `HeartbeatPeriod` (30 s) the dagstore sends to every connected peer, on a new protocol `/proxima/dagstore/<rendezvous>`, a small message: the role (dagstore, section 5.1), the newest sealed canonical branch (its txid carries its slot), starting branch, canonical tip, lost count. libp2p authenticates the sender, so the message is not signed. Its sends also keep dynamic peers from dropping the dagstore as idle (`idlePeerTimeout`), as connectivity records do.
+**Heartbeat.** Every `HeartbeatPeriod` (30 s) the dagstore sends to every connected peer, on a new protocol `/proxima/dagstore/<rendezvous>`, a small message: the newest sealed canonical branch (its txid carries its slot), starting branch, canonical tip, lost count. Layout, integers big-endian: `sealed branch (32) | starting branch (32) | canonical tip (32) | lost u64`, 104 bytes. The role (dagstore, section 5.1) is implicit: whoever speaks the protocol is a dagstore. libp2p authenticates the sender, so the message is not signed.
+
+A node bans a peer for 10 minutes as "another ledger" when the peer refuses one of its protocols. The dagstore protocol is exempt, so a node without dagstore support that refuses the heartbeat stream is not banned; it costs one failed protocol negotiation per heartbeat. Only the side opening a stream ever bans, so such nodes behave as before. Its sends also keep dynamic peers from dropping the dagstore as idle (`idlePeerTimeout`), as connectivity records do.
 
 **On the node,** a new module `txstore_purger` reads heartbeats only from its trusted dagstores and deletes txstore entries with slot below
 
@@ -350,7 +375,7 @@ Below a configured slot, the dagstore exports a sealed range into an archive seg
 | `CanonicalDepthSlots` | 120 (about 20 min), never below 64 | A lineage is canonical only from this depth behind the LRB; split slots settle within a few slots. Tune on measurements ([`kb/research/split_slots.md`](https://github.com/lunfardo314/proxima/blob/develop/kb/research/split_slots.md)) |
 | `OrphanPurgeSlots` | 360 (about 1 h) | Must exceed the latest inclusion delay (section 6.5) |
 | `HeartbeatPeriod` | 30 s | As asked |
-| `BranchListMaxSlots` | 150 | One `PullBranchList` request: about 750 branches today, about 50 KB of reply |
+| `BranchListMaxSlots` | 150 | One `PullBranchList` request: at the 86 branches a slot measured before library upgrade 7 (section 8.2.1), about 12,900 entries, 13 reply messages of up to 1,023 entries (64 KB) |
 | `PullTimeout` | 5 s | A feeder answers in well under a second; silence means it does not have it |
 | `HistoryPullsPerSecond` / `PullsPerSecondPerFeeder` | 20 / 5 | Far below the 500/s per-stream server limit |
 | `BroadPullPerSecond` | 1 | Every peer pays for a broad pull |
@@ -368,7 +393,7 @@ Small, behind config, inactive unless a dagstore is declared. No ledger change, 
 4. **txstore:** the cone walker carved out of [`proxi/db_cmd/txstore/audit.go`](https://github.com/lunfardo314/proxima/blob/develop/proxi/db_cmd/txstore/audit.go) into a package, `audit` rewritten on it; prefix delete of a slot in `SimpleTxBytesStore`.
 5. **node:** `txstore_purger` module, `txstore.keep_slots`, value-log GC on `txstore`.
 6. **ledger:** a library initialiser from the ledger identity and `ledger.Upgrades`, without a state store.
-7. **api/dag_explorer:** take an interface instead of the Badger txstore, so the dagstore serves the same explorer page.
+7. **api/dag_explorer:** nothing to change. It already takes an interface, `TxStore` (lookup by txid and iteration by key prefix), which the dagstore implements over SQLite (section 11.2).
 8. **peering:** the `PullLRB` and `PullBranchList` request types and their replies (the `PullLRB` reply also carries the feeder's oldest txstore slot and purge floor, for the dashboard, section 11.1), answered only to trusted dagstores (section 6.2.1); the branch list over the txstore only on a node. The request handlers sit behind an interface, so a dagstore acting as source answers them from its database (section 5.4); the push side is the same `PushTxBytesToDAGStores`.
 9. **proxi:** a later `proxi dagstore ...` command group, a client of the dagstore API.
 
@@ -411,6 +436,24 @@ The dagstore serves a web dashboard on the API port, so an operator can see at a
 | **Main parameters** | The configuration in force: `CanonicalDepthSlots`, `OrphanPurgeSlots`, pull budgets and timeouts, `BranchListMaxSlots`, feeder and trusted-peer lists |
 
 How far back a feeder's txstore reaches and its purge floor come from the feeder itself, added to the `PullLRB` reply (section 10).
+
+### 11.2 Built
+
+`cmd/dagstore` serves a database read-only, as the offline importer leaves it: the endpoints of the table above at the paths given there, the dashboard at `/`, and the explorer of `api/dag_explorer` at `/dag_explorer`, unchanged, over an adapter of its `TxStore` interface. What the table does not say:
+
+- **Bounds.** Every list is paged: `limit` (default 100, at most 1,000) and `after`, the `next` value of the previous page. A slot range covers at most 1,000 slots, a cone at most 10,000 vertices, and the queries of one request stop after 15 s. `/export` alone is unbounded and untimed: it is meant for bulk transfer.
+- **`/range`** filters by `kind` (`plain`, `sequencer`, `branch`, `mining`) and `status` (a state, `confirmed`, or `unconfirmed`: stored but on no canonical cone). Rows are in txid order, which is time order.
+- **`/forks`** over the whole store, without a slot range, needs `min_length` of at least 2: forks of length 1 are about one per sequencer per slot.
+- **`/future_cone`** follows inputs and endorsements but not baselines, which have no reverse index: a transaction linked to the walk only by its baseline is missed. An index on `tx(baseline)` would close it, if needed.
+- **`/confirmed_in`** needs no index on `confirming_branch`: everything a branch newly confirms is reached from the branch through transactions it newly confirms, so it walks the cone through those only. Checked against a full scan of `tx` on two branches.
+- **`/account`** and **`/chain`** list outputs in store order, close to time order. `/account` takes the holder in hex or in the form `proxi` prints, `addressED25519(0x…)`.
+- **`/export`** writes each transaction as a 4-byte big-endian length followed by its bytes, in txid order.
+- **`/status`** is cheap; **`/stats`** is a snapshot of whole-table aggregates and per-table sizes, recomputed every 10 minutes (11 s on the imported database, most of it SQLite's `dbstat`).
+- **Libraries** come from the database's own `library` table (section 7.1), which the importer now fills, and are checked at start against the libraries this build makes for each upgrade; the dashboard shows the result and an alarm on a difference.
+- **Printing a transaction** (`/tx`) uses proxima's printers, which read what partial-context validation sets up, so it runs there, with the library of the transaction's slot. It is display only: nothing stored or sealed depends on it, and a failure is shown beside the text.
+- **The dashboard** shows the panels of section 11.1 from `/status` and `/stats`. The sync, feeder and intake panels say "not running" until the live modules exist.
+
+On the imported database (9.5 M transactions, 10.8 GB): lookups by txid, output, account, chain, slot and branch answer in about 1 ms; a 1,000-slot range with a filter that matches nothing in 0.3 s; a past cone of 10,000 vertices in 0.5 s; the 512 transactions one branch confirms in 30 ms.
 
 ## 12. Rollout
 

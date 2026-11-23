@@ -21,7 +21,7 @@ The full design is in [SPEC.md](SPEC.md).
 Early development. Two programs exist:
 
 - `dagstore-import`, an offline importer: it reads the transaction store of a stopped Proxima node and writes the history it holds into a new dagstore database, to test the database design and measure its size on real data (results in [SPEC.md](SPEC.md), section 8.2.1).
-- `dagstore`, which serves such a database read-only: the query API, a dashboard, and Proxima's DAG explorer pages. Receiving transactions from nodes, following the network and sealing history are not built yet.
+- `dagstore`, which serves such a database: the query API, a dashboard, and Proxima's DAG explorer pages. With a config file it also follows the network through one or more Proxima nodes, its *feeders*: it receives every transaction they take in, pulls what is missing, links and checks the history branch by branch and seals it ([SPEC.md](SPEC.md), section 6.7). Replication between dagstores, archive segments and node-side purging in production are not done yet.
 
 ## How to run
 
@@ -42,6 +42,25 @@ go build -o dagstore ./cmd/dagstore
 ```
 
 It logs to standard error: startup, a stats line every 10 minutes, server errors and requests slower than 2 s (`-slow_request`); `-log_level debug` adds every request.
+
+Following the network takes a config file with a `dagstore` section and Proxima's `peering` section, the feeding node listed as a static peer and named in `peering.feeders`; the node, on its side, lists the dagstore as a static peer and in `peering.dagstores`:
+
+```
+dagstore:
+  db: ./live.db
+  listen: 127.0.0.1:8091
+  library_api: http://127.0.0.1:8000   # a node API: the libraries of a new database, with their proofs
+peering:
+  host: {id_private_key: ..., id: ..., port: 4004}
+  peers: {feeder: /ip4/127.0.0.1/udp/4000/quic-v1/p2p/<node peer ID>}
+  feeders: [feeder]
+  max_dynamic_peers: 0
+  allow_local_ips: true
+```
+
+```
+./dagstore -config dagstore.yaml
+```
 
 The dashboard is at `http://127.0.0.1:8090/`, the DAG explorer at `/dag_explorer`, and the API endpoints are listed in [SPEC.md](SPEC.md), section 11.
 

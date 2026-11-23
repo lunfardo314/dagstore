@@ -1,6 +1,6 @@
 # DAGStore — long-term storage of the tangle history
 
-> **DRAFT** 2026-11-22, revision 7 (deployment-neutral, for publication with the `dagstore` repository). Built so far: the offline importer (section 8.2.1) and the read-only query API with the dashboard (section 11.2); no intake, sync or sealing yet. Separate repository `dagstore`, depending on `proxima` for code, never the other way round (hard constraint, section 2.3). Proxima-side changes are listed in section 10 and need their own `feat/` branch.
+> **DRAFT** 2026-11-22, revision 8 (deployment-neutral, for publication with the `dagstore` repository). Built so far: the offline importer (section 8.2.1), the query API with the dashboard (section 11.2), and the live process: intake, history walk, sealing and heartbeat (section 6.7). Separate repository `dagstore`, depending on `proxima` for code, never the other way round (hard constraint, section 2.3). Proxima-side changes are listed in section 10 and need their own `feat/` branch.
 
 ## 1. Problem
 
@@ -237,6 +237,24 @@ The dagstore stores DAG history, not a decision about it, so a fork is ordinary 
 
 In practice there will be no such fork; the design does not depend on that. Consistency of links holds across the whole tree: each branch's stem input points to its predecessor, each transaction's inputs and endorsements point to stored transactions, whichever lineage they belong to.
 
+### 6.7 Built
+
+Package `live`, run by `dagstore -config <file>` beside the query API. One goroutine owns the write connection and commits every second. It does all of this section:
+
+- **Intake:** gossip from feeders only, dedup by txid, stage-1 parse, txid check.
+- **Tip and branch table:** `PullLRB` every minute; the branch list fetched from the feeder's oldest txstore slot to the first LRB, then branches by push.
+- **Canonical numbering:** at `CanonicalDepthSlots` behind the LRB, waiting for any branch of the lineage not stored yet.
+- **The walk:** slot by slot, the canonical branch first, linking, checking each signature and writing edges and outputs.
+- **Gaps:** recorded per branch in a table `waiting`; a walk resumes from a transaction when it arrives. A resumed canonical walk takes over what a later canonical branch reached meanwhile, since a transaction is confirmed by the first canonical branch whose cone holds it.
+- **Pulls:** the feeder ladder, at most `PullsPerSecondPerFeeder` per feeder, rounds, then `lost`. The order matters: first the branches the canonical tip waits for (the LRB and its lineage), then the oldest transaction due. Sealing advances in slot order, so in random order each branch waited behind thousands of newer pulls. The budgets are config keys (`dagstore.pulls_per_second_per_feeder`, `dagstore.history_pulls_per_second`). A gap in the LRB's lineage, from pushes a feeder dropped in a burst, is filled by fetching the branch list again over the gap rather than by one pull per branch.
+- **Sealing, forks, orphan purge, heartbeat:** sealing in slot order; fork rows; orphan purge at `OrphanPurgeSlots`; the heartbeat every `HeartbeatPeriod`.
+
+The libraries of a new database are fetched from a node API (`dagstore.library_api`), each with its proof, and stored.
+
+**Checked by replay.** `live/TestReplay` feeds 500 to 600 slots of a real txstore through the intake, the heaviest branch of each slot taken as the LRB, and compares with the offline importer's database of the same txstore. The two agree exactly away from the ends of the range: canonical lineage, the confirmations of every canonical branch, and every kept transaction. That held in order, and with one transaction in seven, branches included, delivered 160 slots late. No edge dangles after the orphan purge. Speed: about 2,000 to 3,000 transactions a second on one core.
+
+**Not built yet:** the LRB most feeders agree on (with several feeders the last answer wins); broad pulls; renumbering after a real fork (the canonical tip stops moving and an error is logged); replication and the source side of section 5.4; archive segments.
+
 ## 7. Libraries, network identity, and the nodes' txstore
 
 ### 7.1 Libraries
@@ -268,7 +286,8 @@ A node bans a peer for 10 minutes as "another ledger" when the peer refuses one 
 floor = slot(newest announced sealed branch on the node's own lineage) - txstore.keep_slots
 ```
 
-- `txstore.keep_slots`: default 17480 (about two days, equal to `BranchTxIDStateTTLSlots`), never below 8740 (about one day, `sync.max_slots_behind`, the reach of forward sync, which other nodes serve from their txstore).
+- **Purging is a separate opt-in (decided).** A node deletes only with `txstore.purge: true` (default false) and at least one trusted dagstore declared; declaring a dagstore in `peering.dagstores` alone never deletes anything.
+- `txstore.keep_slots`: default 17480 (about two days, equal to `BranchTxIDStateTTLSlots`), never below 8740 (about one day, `sync.max_slots_behind`, the reach of forward sync, which other nodes serve from their txstore). The minimum leaves no margin: a peer catching up by forward sync pulls up to `sync.max_slots_behind` (8740) slots back plus a past-cone overhang, so at 8740 such pulls may miss; the default leaves a day.
 - A sealed branch counts only when it is on the node's own lineage: the node has committed it (`multistate.FetchRootRecord`), which a branch minutes old always satisfies on a node on that lineage. A node on another fork deletes nothing until a dagstore seals a branch of its lineage.
 - One trusted dagstore's announcement is enough (decided: no spot-check before deleting; with two dagstores an operator compares their `/status`). The floor only rises. Without a heartbeat nothing is deleted. A node with no trusted dagstore never deletes, which is today's behaviour.
 - Orphans in the node's txstore are deleted too.
@@ -277,7 +296,7 @@ floor = slot(newest announced sealed branch on the node's own lineage) - txstore
 
 **Gradual cleaning of long-running nodes' txstores.** While the first sync runs, the sealed tip climbs from genesis, and the floor climbs behind it, `keep_slots` lower: the txstores of nodes running since genesis shrink from the oldest slot forward, at the pace of the sync, never ahead of it. Once the dagstores reach the present, every node keeps about `keep_slots` of history.
 
-To verify before release: nothing in the node reads txstore entries older than `keep_slots` (restart rebuild, memDAG reattach, pull serving for catching-up nodes, the dagviz tools).
+Checked by a survey of the node code (2026-11-22): nothing in the node reads txstore entries older than `keep_slots` except pull serving. Restart rebuilds the memDAG from the state, memDAG reattach reads a few hundred slots back, snapshots do not touch the txstore, and API reads of a purged transaction answer not-found. Pull serving to peers catching up by forward sync is the one coupling, covered by the margin of `keep_slots` above. A transaction received again after it was purged is written again below the floor and purged again on the next round.
 
 **Pull routing on the node.** After purging, only dagstores hold old transactions. A node's pull for a txid older than `current slot - txstore.keep_slots` goes to its trusted dagstores only, and falls back to a broadcast when none is alive. Newer txids are broadcast as today, trusted dagstores included. Nodes that do not declare a dagstore still reach it by broadcast, as a dynamic peer.
 
@@ -391,7 +410,7 @@ Small, behind config, inactive unless a dagstore is declared. No ledger change, 
 2. **txinput_queue:** the one-line push after `MustPersistTxBytes`; export `inGate` (generic, self-contained in `ingate.go`).
 3. **ledger/transaction** or **ledger/base:** a plain Go signature check, `ed25519.Verify` of the signature data over the txid with an exact-length check, if none is exported yet.
 4. **txstore:** the cone walker carved out of [`proxi/db_cmd/txstore/audit.go`](https://github.com/lunfardo314/proxima/blob/develop/proxi/db_cmd/txstore/audit.go) into a package, `audit` rewritten on it; prefix delete of a slot in `SimpleTxBytesStore`.
-5. **node:** `txstore_purger` module, `txstore.keep_slots`, value-log GC on `txstore`.
+5. **node:** `txstore_purger` module behind `txstore.purge` (default false) and a declared trusted dagstore; `txstore.keep_slots`; deletion oldest slot first in batches (about 20 slots per 10 s), not Badger `DropPrefix`, which stops writes; value-log GC on `txstore`. Metrics `proxima_txstore_purge_floor` and `proxima_txstore_slots_purged`.
 6. **ledger:** a library initialiser from the ledger identity and `ledger.Upgrades`, without a state store.
 7. **api/dag_explorer:** nothing to change. It already takes an interface, `TxStore` (lookup by txid and iteration by key prefix), which the dagstore implements over SQLite (section 11.2).
 8. **peering:** the `PullLRB` and `PullBranchList` request types and their replies (the `PullLRB` reply also carries the feeder's oldest txstore slot and purge floor, for the dashboard, section 11.1), answered only to trusted dagstores (section 6.2.1); the branch list over the txstore only on a node. The request handlers sit behind an interface, so a dagstore acting as source answers them from its database (section 5.4); the push side is the same `PushTxBytesToDAGStores`.

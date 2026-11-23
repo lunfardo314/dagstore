@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -16,7 +17,10 @@ import (
 
 	"github.com/lunfardo314/dagstore"
 	"github.com/lunfardo314/dagstore/api"
+	"github.com/lunfardo314/dagstore/live"
 	"github.com/lunfardo314/dagstore/store"
+	"github.com/lunfardo314/proxima/global"
+	"github.com/spf13/viper"
 )
 
 func main() {
@@ -28,6 +32,7 @@ func main() {
 	flag.DurationVar(&cfg.StatsInterval, "stats_interval", cfg.StatsInterval, "period of the stats snapshot")
 	flag.DurationVar(&cfg.SlowRequest, "slow_request", cfg.SlowRequest, "requests taking longer are logged")
 	logLevel := flag.String("log_level", "info", "debug, info, warn or error; debug logs every request")
+	configPath := flag.String("config", "", "live mode: config file with the peering section (feeders); without it the database is served read-only")
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *version {
@@ -41,19 +46,51 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	slog.Info(dagstore.BannerString())
+	var libraryAPI string
+	if *configPath != "" {
+		viper.SetConfigFile(*configPath)
+		if err := viper.ReadInConfig(); err != nil {
+			fatal("config", err)
+		}
+		if v := viper.GetString("dagstore.db"); v != "" && cfg.DBPath == "" {
+			cfg.DBPath = v
+		}
+		if v := viper.GetString("dagstore.listen"); v != "" {
+			*listen = v
+		}
+		libraryAPI = viper.GetString("dagstore.library_api")
+		// pull budgets are config values (SPEC.md section 6.3); the defaults spare production feeders
+		if v := viper.GetInt("dagstore.pulls_per_second_per_feeder"); v > 0 {
+			cfg.Params.PullsPerSecondPerFeeder = v
+		}
+		if v := viper.GetInt("dagstore.history_pulls_per_second"); v > 0 {
+			cfg.Params.HistoryPullsPerSecond = v
+		}
+	}
 	if cfg.DBPath == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
 
+	// live mode: the write connection and the ledger libraries come first, then the readers
+	var writeDB *sql.DB
+	var libs []store.Library
+	var err error
+	if *configPath != "" {
+		if writeDB, libs, err = live.Open(cfg.DBPath, libraryAPI); err != nil {
+			fatal("open database", err)
+		}
+		defer writeDB.Close()
+	}
 	db, err := store.OpenReadOnly(cfg.DBPath, *conns)
 	if err != nil {
 		fatal("open database", err)
 	}
 	defer db.Close()
-	libs, err := api.LoadLedger(db)
-	if err != nil {
-		fatal("load libraries", err)
+	if writeDB == nil {
+		if libs, err = api.LoadLedger(db); err != nil {
+			fatal("load libraries", err)
+		}
 	}
 	libInfo := api.CheckLibraries(libs)
 	matching := 0
@@ -71,6 +108,20 @@ func main() {
 	defer stop()
 	srv := api.New(db, cfg)
 	go srv.RunStats(ctx, libInfo)
+	if writeDB != nil {
+		env := global.NewFromConfig()
+		node, err := live.New(writeDB, db, env, cfg.Params)
+		if err != nil {
+			fatal("live", err)
+		}
+		srv.Live = node.Status
+		go func() {
+			if err := node.Run(ctx); err != nil {
+				fatal("live", err)
+			}
+			env.Stop()
+		}()
+	}
 
 	httpSrv := &http.Server{Addr: *listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {

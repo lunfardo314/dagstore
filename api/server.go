@@ -53,6 +53,8 @@ type Server struct {
 	cfg     Config
 	started time.Time
 	stats   atomic.Pointer[Stats]
+	// Live, when set, gives the live process's state for /status and the dashboard
+	Live func() *LiveStatus
 }
 
 func New(db *sql.DB, cfg Config) *Server {

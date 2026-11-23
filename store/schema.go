@@ -10,7 +10,7 @@ import (
 )
 
 // SchemaVersion is stored in meta and bumped on any change of the schema below.
-const SchemaVersion = "1"
+const SchemaVersion = "2"
 
 // Transaction kinds (tx.kind).
 const (
@@ -155,8 +155,11 @@ CREATE TABLE branch (
 	canonical_no   INTEGER,
 	fork           INTEGER,
 	sealed         INTEGER NOT NULL DEFAULT 0,
-	gaps           INTEGER NOT NULL DEFAULT 0
+	gaps           INTEGER NOT NULL DEFAULT 0,
+	walked         INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX branch_unsealed ON branch(slot) WHERE sealed = 0;
+CREATE INDEX branch_unwalked ON branch(slot) WHERE walked = 0;
 CREATE INDEX branch_slot ON branch(slot);
 CREATE UNIQUE INDEX branch_canonical ON branch(canonical_no) WHERE canonical_no IS NOT NULL;
 
@@ -172,8 +175,18 @@ CREATE TABLE missing (
 	tx            INTEGER PRIMARY KEY,
 	referenced_by INTEGER,
 	first_needed  INTEGER,
-	tried         TEXT
+	tried         TEXT,
+	rounds        INTEGER NOT NULL DEFAULT 0
 );
+
+-- waiting: the walk of a branch stopped at a transaction not stored yet; it resumes there when the
+-- transaction arrives, and the branch is sealed only when nothing it waits for is pending.
+CREATE TABLE waiting (
+	tx     INTEGER NOT NULL,
+	branch INTEGER NOT NULL,
+	PRIMARY KEY (tx, branch)
+) WITHOUT ROWID;
+CREATE INDEX waiting_branch ON waiting(branch);
 
 CREATE TABLE library (
 	upgrade_index   INTEGER PRIMARY KEY,

@@ -389,20 +389,10 @@ func (im *importer) placeholder(n *node, txid base.TransactionID, state int) {
 func (im *importer) insert(n *node, tx *transaction.Transaction, canonical bool, branchID int64) {
 	txid := tx.ID()
 	raw := tx.Bytes()
-	kind := store.KindPlain
+	kind := store.TxKind(tx)
 	var seq any
-	switch {
-	case tx.IsBranchTransaction():
-		kind = store.KindBranch
-	case tx.IsSequencerTransaction():
-		kind = store.KindSequencer
-	case tx.IsMiningTransaction():
-		kind = store.KindMining
-	}
-	if tx.IsSequencerTransaction() {
-		if id, ok := sequencerID(tx); ok {
-			seq = im.chainRow(id, store.ChainSequencer)
-		}
+	if id, ok := store.SequencerID(tx); ok {
+		seq = im.chainRow(id, store.ChainSequencer)
 	}
 	var baseline any
 	if bl, ok := tx.ExplicitBaseline(); ok {
@@ -447,33 +437,18 @@ func (im *importer) insert(n *node, tx *transaction.Transaction, canonical bool,
 
 func (im *importer) output(txRow int64, i byte, o *ledger.Output, oid base.OutputID) {
 	im.stats.outputs++
+	f := store.OutputFactsOf(o, oid)
 	var lockKind, account, chain any
-	if lock, err := ledger.LockFromOutputElements(o.MustAt(int(ledger.ConstraintIndexIndexValues)), o.MustAt(int(ledger.ConstraintIndexLock))); err == nil {
-		lockKind = im.lockKindRow(lock.Name())
+	if f.Lock != "" {
+		lockKind = im.lockKindRow(f.Lock)
 	} else {
 		im.stats.unknownLock++
 	}
-	for _, v := range o.IndexValues() {
-		if len(v) > 0 {
-			account = im.accountRow(v)
-			break
-		}
+	if f.Account != nil {
+		account = im.accountRow(f.Account)
 	}
-	if cc := o.ChainConstraint(); cc != nil {
-		id := cc.ChainID
-		if cc.IsOrigin() {
-			id = base.MakeOriginChainID(oid)
-		}
-		kind := store.ChainOther
-		switch {
-		case id == base.MineChainID:
-			kind = store.ChainMine
-		case o.IsSequencerOutput():
-			kind = store.ChainSequencer
-		case o.DelegationLock() != nil:
-			kind = store.ChainDelegation
-		}
-		chain = im.chainRow(id, kind)
+	if f.ChainID != nil {
+		chain = im.chainRow(*f.ChainID, f.ChainKind)
 	}
 	im.exec("output", txRow, i, int64(o.TokenBalance()), lockKind, account, chain)
 }
@@ -602,31 +577,9 @@ func (im *importer) exec(stmt string, args ...any) {
 
 // branchData reads the stem lock and the sequencer ID of a branch transaction.
 func branchData(tx *transaction.Transaction) (stem *ledger.StemLock, seqID base.ChainID, ok bool) {
-	tx.ForEachProducedOutput(func(_ byte, o *ledger.Output, _ base.OutputID) bool {
-		if s, isStem := o.StemLock(); isStem {
-			stem = s
-			return false
-		}
-		return true
-	})
-	seqID, okSeq := sequencerID(tx)
+	stem = store.Stem(tx)
+	seqID, okSeq := store.SequencerID(tx)
 	return stem, seqID, stem != nil && okSeq
-}
-
-func sequencerID(tx *transaction.Transaction) (ret base.ChainID, ok bool) {
-	tx.ForEachProducedOutput(func(_ byte, o *ledger.Output, oid base.OutputID) bool {
-		if !o.IsSequencerOutput() {
-			return true
-		}
-		if cc := o.ChainConstraint(); cc != nil {
-			ret, ok = cc.ChainID, true
-			if cc.IsOrigin() {
-				ret = base.MakeOriginChainID(oid)
-			}
-		}
-		return false
-	})
-	return
 }
 
 // loadLibraries initialises the ledger libraries from the node's state database and returns every

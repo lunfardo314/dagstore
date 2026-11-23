@@ -38,6 +38,40 @@ type branchPoint struct {
 	Lag         string `json:"lag"`
 }
 
+// LiveStatus is the live process's state: its feeders, their LRB, the branch list fetch, the
+// history walker and the intake counters (cumulative since start).
+type LiveStatus struct {
+	Feeders        int         `json:"feeders"`
+	FeedersAlive   int         `json:"feeders_alive"`
+	LRB            string      `json:"lrb,omitempty"`
+	LRBSlot        uint32      `json:"lrb_slot,omitempty"`
+	BranchFetch    BranchFetch `json:"branch_fetch"`
+	WalkerSlot     *uint32     `json:"walker_slot,omitempty"`
+	PendingPulls   int         `json:"pending_pulls"`
+	Intake         int         `json:"intake_queue"`
+	Pushed         int64       `json:"pushed"`
+	PulledIn       int64       `json:"pulled_in"`
+	Duplicates     int64       `json:"duplicates"`
+	NotFromFeeders int64       `json:"not_from_feeders"`
+	BadBytes       int64       `json:"bad_bytes"`
+	Stored         int64       `json:"stored"`
+	Linked         int64       `json:"linked"`
+	SigFailed      int64       `json:"sig_failed"`
+	PullsSent      int64       `json:"pulls_sent"`
+	Lost           int64       `json:"lost"`
+	Purged         int64       `json:"purged_orphans"`
+}
+
+type BranchFetch struct {
+	Started          bool   `json:"started"`
+	Done             bool   `json:"done"`
+	NextSlot         uint32 `json:"next_slot"`
+	TargetSlot       uint32 `json:"target_slot"`
+	FeederOldestSlot uint32 `json:"feeder_oldest_slot"`
+	FeederPurgeFloor uint32 `json:"feeder_purge_floor"`
+	Entries          int    `json:"entries"`
+}
+
 // Status is what /status returns: where the store stands, cheap to compute, plus the counters of
 // the latest stats snapshot.
 type Status struct {
@@ -54,6 +88,7 @@ type Status struct {
 	FeedersLRB    *branchPoint `json:"feeders_lrb"`
 	Feeders       []string     `json:"feeders"`
 	HistoryWalker *uint32      `json:"history_walker_slot"`
+	Live          *LiveStatus  `json:"live,omitempty"`
 
 	Intake         *int64     `json:"intake,omitempty"`
 	MissingPending *int64     `json:"missing_pending,omitempty"`
@@ -94,6 +129,16 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
 		WHERE canonical_no IS NOT NULL AND sealed = 1 ORDER BY canonical_no DESC LIMIT 1)`, st.CurrentSlot); err != nil {
 		return err
 	}
+	if s.Live != nil {
+		st.Mode = "live: following feeders"
+		st.Live = s.Live()
+		st.HistoryWalker = st.Live.WalkerSlot
+		if st.Live.LRB != "" {
+			if st.FeedersLRB, err = s.branchPoint(ctx, `WHERE t.txid = ?`, st.CurrentSlot, mustHex(st.Live.LRB)); err != nil {
+				return err
+			}
+		}
+	}
 	if snap := s.stats.Load(); snap != nil {
 		st.Intake = ptr(snap.Tx.ByState["intake"].Count)
 		st.MissingPending, st.MissingLost = ptr(snap.Missing.Pending), ptr(snap.Missing.Lost)
@@ -104,6 +149,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func mustHex(s string) []byte {
+	b, _ := hex.DecodeString(s)
+	return b
+}
 
 func (s *Server) branchPoint(ctx context.Context, where string, current uint32, args ...any) (*branchPoint, error) {
 	var (

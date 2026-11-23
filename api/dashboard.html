@@ -114,6 +114,7 @@ const txLink = (txid, short) => `<a class="mono" href="/tx/${esc(txid)}">${esc(s
 const rows = (el, list) => { $(el).innerHTML = list.map(([k, v, cls]) =>
   `<tr><th>${esc(k)}</th><td class="${cls || ""}">${v}</td></tr>`).join(""); };
 const notRunning = '<span class="muted">not running</span>';
+let prevLive = null;
 
 function point(p) {
   if (!p) return '<span class="muted">—</span>';
@@ -134,21 +135,39 @@ function renderStatus(st) {
   ]);
   const walker = st.history_walker_slot;
   const tip = st.canonical_tip ? st.canonical_tip.slot : null, start = st.starting_branch ? st.starting_branch.slot : null;
+  const lv = st.live, bf = lv ? lv.branch_fetch : null;
   rows("sync", [
-    ["Branch table fetch", notRunning],
-    ["History walker", walker == null ? notRunning :
-      `slot ${num(walker)}, ${pct(walker - start, tip - start)} of the way to the canonical tip`],
-    ["Canonical lineage held", start == null ? "—" : `slots ${num(start)} … ${num(tip)} (${num(tip - start + 1)} slots)`],
+    ["Branch table fetch", !lv ? notRunning : !bf.started ? "waiting for the first LRB" :
+      bf.done ? `done: slots ${num(bf.feeder_oldest_slot)} … ${num(bf.target_slot)}, ${num(bf.entries)} entries` :
+      `slot ${num(bf.next_slot)} of ${num(bf.feeder_oldest_slot)} … ${num(bf.target_slot)}, ${num(bf.entries)} entries`],
+    ["History walker", walker == null ? (lv ? "waiting for a canonical branch" : notRunning) :
+      `slot ${num(walker)}` + (tip != null && start != null ? `, ${pct(walker - start, tip - start)} of the way to the canonical tip` : "")],
+    ["Canonical lineage held", start == null || tip == null ? "—" : `slots ${num(start)} … ${num(tip)} (${num(tip - start + 1)} slots)`],
   ]);
-  rows("feeders", st.feeders.length ? st.feeders.map(f => [f, ""]) :
-    [["Feeders", '<span class="muted">none declared</span>'], ["Replicas", '<span class="muted">none declared</span>']]);
-  rows("intake", [
+  rows("feeders", lv ? [
+    ["Feeders alive", `${lv.feeders_alive} of ${lv.feeders}`, lv.feeders_alive ? "ok" : "bad"],
+    ["Their txstore", bf.started ? `from slot ${num(bf.feeder_oldest_slot)}, purge floor ${bf.feeder_purge_floor ? num(bf.feeder_purge_floor) : "none"}` : "—"],
+    ["Replicas", '<span class="muted">none declared</span>'],
+  ] : [["Feeders", '<span class="muted">none declared</span>'], ["Replicas", '<span class="muted">none declared</span>']]);
+  const rate = k => {
+    if (!lv || !prevLive) return "—";
+    const dt = (Date.now() - prevLive.at) / 1000;
+    return dt > 0 ? ((lv[k] - prevLive[k]) / dt).toFixed(1) + "/s" : "—";
+  };
+  rows("intake", lv ? [
+    ["Pushes", `${rate("pushed")} <span class="muted">(${num(lv.pushed)} since start)</span>`],
+    ["Pulls answered", `${rate("pulled_in")} <span class="muted">(${num(lv.pulled_in)}; ${num(lv.pulls_sent)} sent, ${num(lv.pending_pulls)} pending)</span>`],
+    ["Copies dropped", num(lv.duplicates)],
+    ["Linked", `${rate("linked")} <span class="muted">(${num(lv.linked)})</span>`],
+    ["Refused", `${num(lv.bad_bytes)} bad bytes, ${num(lv.sig_failed)} bad signatures, ${num(lv.not_from_feeders)} not from feeders`,
+      lv.bad_bytes || lv.sig_failed ? "warn" : ""],
+    ["Intake queue", num(lv.intake_queue)],
+  ] : [
     ["Intake (unlinked)", num(st.intake)],
     ["Pushes per second", notRunning],
-    ["Copies dropped", notRunning],
     ["Pulls per second", notRunning],
-    ["Timeouts, broad pulls", notRunning],
   ]);
+  if (lv) prevLive = Object.assign({at: Date.now()}, lv);
   $("footer").textContent = `up ${st.uptime}` + (st.stats_at ? `, stats of ${new Date(st.stats_at).toLocaleString()}` : ", stats being computed");
 }
 

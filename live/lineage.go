@@ -56,6 +56,8 @@ func (n *Node) onLineage(m any) error {
 		return n.onLRB(m.r)
 	case branchListMsg:
 		return n.onBranchList(m.r)
+	case librariesFetched:
+		return n.onLibraries(m)
 	}
 	return nil
 }

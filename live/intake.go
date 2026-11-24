@@ -14,7 +14,7 @@ import (
 
 // counters of the intake, written by peering's goroutines and the loop, read by the API
 var (
-	cntPushed, cntPulledIn, cntDuplicate, cntNotFeeder, cntBadBytes, cntStored atomic.Int64
+	cntPushed, cntPulledIn, cntDuplicate, cntNotFeeder, cntBadBytes, cntStored, cntVersionMismatch atomic.Int64
 )
 
 // onTxBytes is peering's gossip callback. Only feeders are heard (SPEC.md section 5.3); copies of
@@ -31,6 +31,13 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 		return
 	}
 	tx, err := transaction.Parse(txBytes)
+	if errors.Is(err, transaction.ErrTxVersionMismatch) {
+		// a feeder pushes only what it accepted: the network runs a library this dagstore lacks
+		n.gate.Unsee(txid)
+		cntVersionMismatch.Add(1)
+		n.libs.Alarm("feeders send transactions of a library this dagstore does not have: " + err.Error())
+		return
+	}
 	if err != nil || tx.ID() != txid {
 		n.gate.Unsee(txid)
 		cntBadBytes.Add(1)

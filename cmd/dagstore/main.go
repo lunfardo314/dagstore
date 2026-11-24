@@ -74,7 +74,7 @@ func main() {
 
 	// live mode: the write connection and the ledger libraries come first, then the readers
 	var writeDB *sql.DB
-	var libs []store.Library
+	var libs *api.Libraries
 	var err error
 	if *configPath != "" {
 		if writeDB, libs, err = live.Open(cfg.DBPath, libraryAPI); err != nil {
@@ -92,25 +92,29 @@ func main() {
 			fatal("load libraries", err)
 		}
 	}
-	libInfo := api.CheckLibraries(libs)
-	matching := 0
-	for _, l := range libInfo {
-		if l.Check == "genesis" || l.Check == "matches this build" {
-			matching++
-			slog.Debug("library", "upgrade", l.UpgradeIndex, "slot", l.ActivationSlot, "check", l.Check)
-		} else {
+	proven, pending := 0, 0
+	for _, l := range libs.Info() {
+		switch {
+		case l.Alarm || (l.Proven && l.Check != "genesis" && l.Check != "matches this build"):
 			slog.Warn("library", "upgrade", l.UpgradeIndex, "slot", l.ActivationSlot, "check", l.Check)
+		default:
+			slog.Debug("library", "upgrade", l.UpgradeIndex, "slot", l.ActivationSlot, "check", l.Check)
+		}
+		if l.Proven {
+			proven++
+		} else {
+			pending++
 		}
 	}
-	slog.Info("database", "path", cfg.DBPath, "libraries", len(libs), "matching_build", matching)
+	slog.Info("database", "path", cfg.DBPath, "libraries_proven", proven, "libraries_from_build", pending, "alarms", len(libs.Alarms()))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv := api.New(db, cfg)
-	go srv.RunStats(ctx, libInfo)
+	srv := api.New(db, cfg, libs)
+	go srv.RunStats(ctx)
 	if writeDB != nil {
 		env := global.NewFromConfig()
-		node, err := live.New(writeDB, db, env, cfg.Params)
+		node, err := live.New(writeDB, db, env, cfg.Params, libs, libraryAPI)
 		if err != nil {
 			fatal("live", err)
 		}

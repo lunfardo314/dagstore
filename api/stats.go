@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	_ "embed"
@@ -41,25 +40,26 @@ type branchPoint struct {
 // LiveStatus is the live process's state: its feeders, their LRB, the branch list fetch, the
 // history walker and the intake counters (cumulative since start).
 type LiveStatus struct {
-	Feeders        int         `json:"feeders"`
-	FeedersAlive   int         `json:"feeders_alive"`
-	LRB            string      `json:"lrb,omitempty"`
-	LRBSlot        uint32      `json:"lrb_slot,omitempty"`
-	BranchFetch    BranchFetch `json:"branch_fetch"`
-	WalkerSlot     *uint32     `json:"walker_slot,omitempty"`
-	PendingPulls   int         `json:"pending_pulls"`
-	Intake         int         `json:"intake_queue"`
-	Pushed         int64       `json:"pushed"`
-	PulledIn       int64       `json:"pulled_in"`
-	Duplicates     int64       `json:"duplicates"`
-	NotFromFeeders int64       `json:"not_from_feeders"`
-	BadBytes       int64       `json:"bad_bytes"`
-	Stored         int64       `json:"stored"`
-	Linked         int64       `json:"linked"`
-	SigFailed      int64       `json:"sig_failed"`
-	PullsSent      int64       `json:"pulls_sent"`
-	Lost           int64       `json:"lost"`
-	Purged         int64       `json:"purged_orphans"`
+	Feeders         int         `json:"feeders"`
+	FeedersAlive    int         `json:"feeders_alive"`
+	LRB             string      `json:"lrb,omitempty"`
+	LRBSlot         uint32      `json:"lrb_slot,omitempty"`
+	BranchFetch     BranchFetch `json:"branch_fetch"`
+	WalkerSlot      *uint32     `json:"walker_slot,omitempty"`
+	PendingPulls    int         `json:"pending_pulls"`
+	Intake          int         `json:"intake_queue"`
+	Pushed          int64       `json:"pushed"`
+	PulledIn        int64       `json:"pulled_in"`
+	Duplicates      int64       `json:"duplicates"`
+	NotFromFeeders  int64       `json:"not_from_feeders"`
+	BadBytes        int64       `json:"bad_bytes"`
+	Stored          int64       `json:"stored"`
+	Linked          int64       `json:"linked"`
+	SigFailed       int64       `json:"sig_failed"`
+	PullsSent       int64       `json:"pulls_sent"`
+	Lost            int64       `json:"lost"`
+	Purged          int64       `json:"purged_orphans"`
+	VersionMismatch int64       `json:"version_mismatch"`
 }
 
 type BranchFetch struct {
@@ -96,6 +96,7 @@ type Status struct {
 	LongForks      *int64     `json:"forks_longer_than_1,omitempty"`
 	StatsAt        *time.Time `json:"stats_at,omitempty"`
 	Uptime         string     `json:"uptime"`
+	Alarms         []string   `json:"alarms"`
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
@@ -109,6 +110,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
 		CurrentSlot: ledger.TimeNow().Slot,
 		Feeders:     []string{},
 		Uptime:      time.Since(s.started).Round(time.Second).String(),
+		Alarms:      s.Libs.Alarms(),
 	}
 	var err error
 	for _, p := range []struct {
@@ -185,14 +187,6 @@ type tableSize struct {
 	Bytes int64  `json:"bytes"`
 }
 
-// LibraryInfo is a stored library and how it compares with the libraries this build knows.
-type LibraryInfo struct {
-	UpgradeIndex   uint16 `json:"upgrade_index"`
-	ActivationSlot uint32 `json:"activation_slot"`
-	Hash           string `json:"hash"`
-	Check          string `json:"check"`
-}
-
 // Stats is the snapshot /stats returns, recomputed every StatsInterval: the aggregates scan whole
 // tables, so they are not computed per request.
 type Stats struct {
@@ -249,7 +243,7 @@ func (s *Server) serveStats(w http.ResponseWriter, _ *http.Request) error {
 }
 
 // RunStats computes the stats snapshot now and then every StatsInterval, until ctx is done.
-func (s *Server) RunStats(ctx context.Context, libs []LibraryInfo) {
+func (s *Server) RunStats(ctx context.Context) {
 	for {
 		t := time.Now()
 		snap, err := s.computeStats(ctx)
@@ -261,7 +255,7 @@ func (s *Server) RunStats(ctx context.Context, libs []LibraryInfo) {
 		} else {
 			took := time.Since(t).Round(time.Millisecond)
 			snap.Took = took.String()
-			snap.Libraries = libs
+			snap.Libraries = s.Libs.Info()
 			s.stats.Store(snap)
 			slog.Info("stats", "stored", snap.Tx.ByState["linked"].Count, "confirmed", snap.Tx.Confirmed,
 				"branches", snap.Branches.Total, "missing", snap.Missing.Pending, "lost", snap.Missing.Lost,
@@ -392,62 +386,4 @@ func (s *Server) databaseStats(ctx context.Context, st *Stats) error {
 		d.Tables = append(d.Tables, t)
 	}
 	return rows.Err()
-}
-
-// CheckLibraries compares each stored library with the one this build makes for its upgrade
-// (SPEC.md section 7.1): a difference is an alarm, a library the build does not know rests on its
-// proof alone. The libraries must already be loaded into the ledger's cache.
-func CheckLibraries(libs []store.Library) []LibraryInfo {
-	ret := make([]LibraryInfo, 0, len(libs))
-	for i, l := range libs {
-		info := LibraryInfo{UpgradeIndex: l.UpgradeIndex, ActivationSlot: l.ActivationSlot, Hash: hex.EncodeToString(l.Hash)}
-		info.Check = checkLibrary(l, libs[:i])
-		ret = append(ret, info)
-	}
-	return ret
-}
-
-func checkLibrary(l store.Library, earlier []store.Library) string {
-	if l.ActivationSlot == 0 {
-		return "genesis"
-	}
-	var upgrade *ledger.UpgradeDefinition
-	for _, u := range ledger.Upgrades {
-		if u.Slot == l.ActivationSlot {
-			upgrade = u
-		}
-	}
-	if upgrade == nil || len(earlier) == 0 {
-		return "unknown to this build"
-	}
-	built, err := upgrade.Build(earlier[len(earlier)-1].JSON)
-	if err != nil {
-		return "ALARM: this build cannot build it: " + err.Error()
-	}
-	lib, err := ledger.ParseLibraryFromJSON(built, ledger.GetEmbeddedFunctionResolver)
-	if err != nil {
-		return "ALARM: this build's library does not parse: " + err.Error()
-	}
-	if h := lib.LibraryHash(); !bytes.Equal(h[:], l.Hash) {
-		return "ALARM: differs from this build's " + hex.EncodeToString(h[:])
-	}
-	return "matches this build"
-}
-
-// LoadLedger loads the stored libraries into the ledger's library cache, which parsing and
-// printing transactions use, and returns them.
-func LoadLedger(db *sql.DB) ([]store.Library, error) {
-	libs, err := store.LoadLibraries(db)
-	if err != nil {
-		return nil, err
-	}
-	m := make(map[uint32][]byte, len(libs))
-	for _, l := range libs {
-		m[l.ActivationSlot] = l.JSON
-	}
-	ledger.MustInitLibraryCacheFromMap(m)
-	if h := ledger.L(0).LibraryHash(); !bytes.Equal(h[:], libs[0].Hash) {
-		return nil, errors.New("the stored genesis library does not hash to its stored hash")
-	}
-	return libs, nil
 }

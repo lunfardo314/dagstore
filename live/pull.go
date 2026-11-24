@@ -140,21 +140,22 @@ func (n *Node) restore() error {
 // updateInfo refreshes what the API shows of the live state, after each commit.
 func (n *Node) updateInfo() {
 	info := api.LiveStatus{
-		Feeders:        len(n.feeders),
-		FeedersAlive:   0,
-		PendingPulls:   len(n.pulls),
-		Pushed:         cntPushed.Load(),
-		PulledIn:       cntPulledIn.Load(),
-		Duplicates:     cntDuplicate.Load(),
-		NotFromFeeders: cntNotFeeder.Load(),
-		BadBytes:       cntBadBytes.Load(),
-		Stored:         cntStored.Load(),
-		Linked:         cntLinked.Load(),
-		SigFailed:      cntSigFailed.Load(),
-		PullsSent:      cntPullsSent.Load(),
-		Lost:           cntLost.Load(),
-		Purged:         cntPurged.Load(),
-		Intake:         len(n.in),
+		Feeders:         len(n.feeders),
+		FeedersAlive:    0,
+		PendingPulls:    len(n.pulls),
+		Pushed:          cntPushed.Load(),
+		PulledIn:        cntPulledIn.Load(),
+		Duplicates:      cntDuplicate.Load(),
+		NotFromFeeders:  cntNotFeeder.Load(),
+		BadBytes:        cntBadBytes.Load(),
+		Stored:          cntStored.Load(),
+		Linked:          cntLinked.Load(),
+		SigFailed:       cntSigFailed.Load(),
+		PullsSent:       cntPullsSent.Load(),
+		Lost:            cntLost.Load(),
+		Purged:          cntPurged.Load(),
+		VersionMismatch: cntVersionMismatch.Load(),
+		Intake:          len(n.in),
 	}
 	for _, id := range n.feeders {
 		if n.peers.IsAlive(id) {

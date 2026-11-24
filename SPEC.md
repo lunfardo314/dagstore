@@ -249,7 +249,13 @@ Package `live`, run by `dagstore -config <file>` beside the query API. One gorou
 - **Pulls:** the feeder ladder, at most `PullsPerSecondPerFeeder` per feeder, rounds, then `lost`. The order matters: first the branches the canonical tip waits for (the LRB and its lineage), then the oldest transaction due. Sealing advances in slot order, so in random order each branch waited behind thousands of newer pulls. The budgets are config keys (`dagstore.pulls_per_second_per_feeder`, `dagstore.history_pulls_per_second`). A gap in the LRB's lineage, from pushes a feeder dropped in a burst, is filled by fetching the branch list again over the gap rather than by one pull per branch.
 - **Sealing, forks, orphan purge, heartbeat:** sealing in slot order; fork rows; orphan purge at `OrphanPurgeSlots`; the heartbeat every `HeartbeatPeriod`.
 
-The libraries of a new database are fetched from a node API (`dagstore.library_api`), each with its proof, and stored.
+**Libraries** (section 7.1). Those of a new database are fetched from a node API (`dagstore.library_api`), each with its proof, and stored. At every start the ledger's cache gets the stored libraries plus every upgrade the build lists (`ledger.BuildUpgradeLibraries`), so an upgrade the build knows is ready at its slot. Every 10 minutes the network's libraries are fetched again with their proofs:
+
+- one the build makes the same is stored, proven;
+- one differing from the build's or from a stored one raises an alarm and is not stored;
+- one the build does not list is stored, proven, with an alarm to restart, since the cache takes a library only at start.
+
+A transaction whose version the dagstore's libraries do not know is not stored and raises an alarm: a feeder pushes only what it accepted, so the network runs a library the dagstore lacks. The spec's intake of such transactions as `unparsed` is not built; they come back by pull after the restart. Alarms show in `/status` and on the dashboard.
 
 **Checked by replay.** `live/TestReplay` feeds 500 to 600 slots of a real txstore through the intake, the heaviest branch of each slot taken as the LRB, and compares with the offline importer's database of the same txstore. The two agree exactly away from the ends of the range: canonical lineage, the confirmations of every canonical branch, and every kept transaction. That held in order, and with one transaction in seven, branches included, delivered 160 slots late. No edge dangles after the orphan purge. Speed: about 2,000 to 3,000 transactions a second on one core.
 

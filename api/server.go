@@ -55,10 +55,12 @@ type Server struct {
 	stats   atomic.Pointer[Stats]
 	// Live, when set, gives the live process's state for /status and the dashboard
 	Live func() *LiveStatus
+	// Libs are the ledger libraries in use, with their alarms
+	Libs *Libraries
 }
 
-func New(db *sql.DB, cfg Config) *Server {
-	return &Server{db: db, cfg: cfg, started: time.Now()}
+func New(db *sql.DB, cfg Config, libs *Libraries) *Server {
+	return &Server{db: db, cfg: cfg, started: time.Now(), Libs: libs}
 }
 
 // Handler returns the routes of the query API, the dashboard and the DAG explorer.

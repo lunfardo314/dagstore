@@ -19,6 +19,7 @@ import (
 	"github.com/lunfardo314/dagstore/store"
 	"github.com/lunfardo314/proxima/api/client"
 	"github.com/lunfardo314/proxima/global"
+	"github.com/lunfardo314/proxima/ledger"
 	"github.com/lunfardo314/proxima/ledger/base"
 	"github.com/lunfardo314/proxima/ledger/transaction"
 	"github.com/lunfardo314/proxima/ledger/txbuildercore"
@@ -40,8 +41,10 @@ type Node struct {
 	feeders []peer.ID
 	gate    *ingate.Gate[base.TransactionID]
 
-	in      chan received
-	lineage chan any // peering.LRBReply or peering.BranchListReply, with the sender
+	in         chan received
+	lineage    chan any // lineage replies of the feeders and fetched libraries, for the loop
+	libs       *api.Libraries
+	libraryAPI string
 
 	// state of the loop goroutine
 	startSlot   uint32 // slot of the starting branch, 0 until it is known
@@ -64,7 +67,7 @@ type received struct {
 
 // Open opens (or creates) the database at path and loads the ledger libraries: from the database,
 // or, for a new one, from the node API at libraryAPI with their proofs, then stored.
-func Open(path, libraryAPI string) (*sql.DB, []store.Library, error) {
+func Open(path, libraryAPI string) (*sql.DB, *api.Libraries, error) {
 	var db *sql.DB
 	var err error
 	_, statErr := os.Stat(path)
@@ -130,14 +133,64 @@ func fetchLibraries(apiURL string) ([]store.Library, error) {
 		prev := def.PrevUpgradeSlot
 		slot = &prev
 	}
+	genesis, err := ledger.ParseLibraryFromJSON(ret[0].JSON, ledger.GetEmbeddedFunctionResolver)
+	if err != nil {
+		return nil, err
+	}
+	// the upgrade index counts the upgrades the genesis folds
+	folded := ledger.FoldedUpgrades(genesis)
 	for i := range ret {
-		ret[i].UpgradeIndex = uint16(i) // the genesis of this ledger folds no upgrade: checked when loaded
+		ret[i].UpgradeIndex = uint16(i)
+		if i > 0 {
+			ret[i].UpgradeIndex += uint16(folded)
+		}
 	}
 	return ret, nil
 }
 
+// libraryRefresh is how often the network's libraries are fetched and compared (SPEC.md section
+// 7.1): an upgrade activates at a slot known long before, so minutes are soon enough.
+const libraryRefresh = 10 * time.Minute
+
+type librariesFetched struct {
+	libs []store.Library
+	err  error
+}
+
+// refreshLibraries fetches the network's libraries with their proofs, off the loop: the result
+// comes back on the lineage channel.
+func (n *Node) refreshLibraries() {
+	go func() {
+		libs, err := fetchLibraries(n.libraryAPI)
+		n.lineage <- librariesFetched{libs, err}
+	}()
+}
+
+// onLibraries stores the fetched libraries this build makes the same or does not list, and raises
+// the alarms Reconcile finds.
+func (n *Node) onLibraries(r librariesFetched) error {
+	if r.err != nil {
+		slog.Warn("libraries not fetched", "from", n.libraryAPI, "err", r.err)
+		return nil
+	}
+	toStore, alarms := api.Reconcile(n.libs.Stored(), n.libs.Built(), n.libs.BuiltHash(), r.libs)
+	for _, l := range toStore {
+		if _, err := n.exec(`INSERT OR REPLACE INTO library(upgrade_index, activation_slot, hash, json) VALUES (?,?,?,?)`,
+			l.UpgradeIndex, l.ActivationSlot, l.Hash, l.JSON); err != nil {
+			return err
+		}
+		slog.Info("library stored, proven", "upgrade", l.UpgradeIndex, "slot", l.ActivationSlot)
+	}
+	n.libs.Added(toStore)
+	for _, a := range alarms {
+		slog.Error("ALARM", "msg", a)
+		n.libs.Alarm(a)
+	}
+	return nil
+}
+
 // New sets up peering as a dagstore and the intake. The ledger libraries must be loaded.
-func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params) (*Node, error) {
+func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params, libs *api.Libraries, libraryAPI string) (*Node, error) {
 	cfg, err := peering.ReadConfig()
 	if err != nil {
 		return nil, err
@@ -151,15 +204,17 @@ func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params) (*Node,
 		return nil, err
 	}
 	n := &Node{
-		db:      db,
-		rdb:     readDB,
-		params:  params,
-		env:     env,
-		peers:   peers,
-		gate:    ingate.New[base.TransactionID](time.Hour, 100_000, 1_000_000),
-		in:      make(chan received, 10_000),
-		lineage: make(chan any, 100),
-		pulls:   make(map[base.TransactionID]*pullState),
+		db:         db,
+		rdb:        readDB,
+		params:     params,
+		env:        env,
+		peers:      peers,
+		gate:       ingate.New[base.TransactionID](time.Hour, 100_000, 1_000_000),
+		in:         make(chan received, 10_000),
+		lineage:    make(chan any, 100),
+		libs:       libs,
+		libraryAPI: libraryAPI,
+		pulls:      make(map[base.TransactionID]*pullState),
 	}
 	for _, name := range cfg.Feeders {
 		info, err := peer.AddrInfoFromP2pAddr(cfg.PreConfiguredPeers[name].Multiaddr)
@@ -202,6 +257,8 @@ func (n *Node) Run(ctx context.Context) error {
 	defer report.Stop()
 	purge := time.NewTicker(time.Minute)
 	defer purge.Stop()
+	libTimer := time.NewTimer(30 * time.Second)
+	defer libTimer.Stop()
 
 	n.pollLRB()
 	for {
@@ -225,6 +282,11 @@ func (n *Node) Run(ctx context.Context) error {
 			n.logReport()
 		case <-purge.C:
 			err = n.purgeOrphans()
+		case <-libTimer.C:
+			if n.libraryAPI != "" {
+				n.refreshLibraries()
+			}
+			libTimer.Reset(libraryRefresh)
 		}
 		if err != nil {
 			return err

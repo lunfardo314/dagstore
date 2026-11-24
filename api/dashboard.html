@@ -51,6 +51,7 @@ footer { color: var(--muted); font-size: 12px; padding: 0 16px 16px; text-align:
     <a href="/stats">/stats</a>
   </nav>
 </header>
+<div id="alarms" style="display:none; margin:12px 16px 0; padding:10px 14px; border:1px solid var(--bad); border-radius:8px; color:var(--bad); font-weight:600"></div>
 <main>
   <section>
     <h2>Sync progress</h2>
@@ -124,6 +125,9 @@ function point(p) {
 
 function renderStatus(st) {
   $("mode").textContent = st.mode;
+  const al = st.alarms || [];
+  $("alarms").style.display = al.length ? "block" : "none";
+  $("alarms").innerHTML = al.map(a => "ALARM: " + esc(a)).join("<br>");
   $("version").textContent = st.version;
   $("version").title = "commit " + st.commit_hash + ", " + st.commit_time;
   rows("where", [
@@ -159,8 +163,8 @@ function renderStatus(st) {
     ["Pulls answered", `${rate("pulled_in")} <span class="muted">(${num(lv.pulled_in)}; ${num(lv.pulls_sent)} sent, ${num(lv.pending_pulls)} pending)</span>`],
     ["Copies dropped", num(lv.duplicates)],
     ["Linked", `${rate("linked")} <span class="muted">(${num(lv.linked)})</span>`],
-    ["Refused", `${num(lv.bad_bytes)} bad bytes, ${num(lv.sig_failed)} bad signatures, ${num(lv.not_from_feeders)} not from feeders`,
-      lv.bad_bytes || lv.sig_failed ? "warn" : ""],
+    ["Refused", `${num(lv.bad_bytes)} bad bytes, ${num(lv.sig_failed)} bad signatures, ${num(lv.version_mismatch)} of a library not held, ${num(lv.not_from_feeders)} not from feeders`,
+      lv.bad_bytes || lv.sig_failed || lv.version_mismatch ? "warn" : ""],
     ["Intake queue", num(lv.intake_queue)],
   ] : [
     ["Intake (unlinked)", num(st.intake)],
@@ -210,9 +214,10 @@ function renderStats(s) {
     `<tr><th class="mono">${esc(x.name)}</th><td class="n bar"><span class="fill" style="width:${(100 * x.bytes / max).toFixed(1)}%"></span>` +
     `<span class="txt">${bytes(x.bytes)}</span></td><td class="n muted">${stored ? Math.round(x.bytes / stored) + " B/tx" : ""}</td></tr>`).join("") +
     '<tr><td colspan="3" class="note">tables and indexes under 1 MB not shown</td></tr>';
-  $("libs").innerHTML = "<tr><th>Upgrade</th><th>From slot</th><th>Hash</th><th>Against this build</th></tr>" + s.libraries.map(l => {
-    const cls = l.check.startsWith("ALARM") ? "bad" : l.check.startsWith("matches") || l.check === "genesis" ? "ok" : "warn";
-    return `<tr><td>${l.upgrade_index}</td><td class="n">${num(l.activation_slot)}</td><td class="mono">${esc(l.hash.slice(0, 16))}…</td><td class="${cls}">${esc(l.check)}</td></tr>`;
+  $("libs").innerHTML = "<tr><th>Upgrade</th><th>From slot</th><th>Hash</th><th>Proven</th><th>Against this build</th></tr>" + s.libraries.map(l => {
+    const cls = l.alarm ? "bad" : l.check.startsWith("matches") || l.check === "genesis" ? "ok" : "warn";
+    return `<tr><td>${l.upgrade_index}</td><td class="n">${num(l.activation_slot)}</td><td class="mono">${esc(l.hash.slice(0, 16))}…</td>` +
+      `<td>${l.proven ? "yes" : '<span class="muted">not yet</span>'}</td><td class="${cls}">${esc(l.check)}</td></tr>`;
   }).join("");
   const p = s.config.params, c = s.config, dur = ns => (ns / 1e9) + " s";
   rows("params", [

@@ -22,6 +22,12 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 
 - **Purging a node's txstore** from the dagstore's heartbeat (7.2), behind the node's `txstore.purge` key. Never run against a dagstore.
 
+## Documentation and presentation
+
+- **User-facing documentation and an operations guide**, for this repository (README) and for the public docs site: what the dagstore is, how to set it up beside a node, the config keys, the dashboard and the query API, and running and recovering it.
+- **Code comments**: explain the why throughout and point to SPEC.md where a rule comes from, naming the spec and the topic rather than section numbers, which drift.
+- **A better-looking dashboard**: clearer layout and hierarchy, the important numbers first, light and dark themes kept.
+
 ## Open decisions
 
 - **The cones of losing branches** (13): keep them all, as decided, or only the branch transactions. On a well-connected node after library upgrade 7, most of a history pass serves losing branches' cones; to be measured over a longer run before deciding.

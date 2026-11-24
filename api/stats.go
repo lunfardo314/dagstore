@@ -60,6 +60,7 @@ type LiveStatus struct {
 	Lost            int64       `json:"lost"`
 	Purged          int64       `json:"purged_orphans"`
 	VersionMismatch int64       `json:"version_mismatch"`
+	Unparsed        int64       `json:"stored_unparsed"`
 }
 
 type BranchFetch struct {

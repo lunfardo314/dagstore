@@ -59,9 +59,14 @@ type Node struct {
 	info api.LiveStatus
 }
 
+// received is a transaction from a feeder, parsed, or only its bytes when they are of a library
+// the dagstore does not hold yet (tx nil): those are stored unparsed and parsed after the restart
+// that loads the library.
 type received struct {
 	from   peer.ID
 	tx     *transaction.Transaction
+	txid   base.TransactionID
+	raw    []byte
 	pulled bool
 }
 
@@ -238,6 +243,9 @@ func (n *Node) Run(ctx context.Context) error {
 		return err
 	}
 	if err := n.restore(); err != nil {
+		return err
+	}
+	if err := n.parsePending(); err != nil {
 		return err
 	}
 	n.commitOrDie()

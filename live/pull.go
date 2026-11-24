@@ -155,6 +155,7 @@ func (n *Node) updateInfo() {
 		Lost:            cntLost.Load(),
 		Purged:          cntPurged.Load(),
 		VersionMismatch: cntVersionMismatch.Load(),
+		Unparsed:        cntUnparsed.Load(),
 		Intake:          len(n.in),
 	}
 	for _, id := range n.feeders {

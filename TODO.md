@@ -4,7 +4,6 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 
 ## Before a real deployment
 
-- **Transactions of a library not held** (7.1). They are dropped with an alarm; the spec wants them stored `unparsed` and parsed once the library arrives. Today they come back by pull after the restart that loads the library. Library refresh itself is built (SPEC 6.7).
 - **Several feeders** (6.2, 6.3). The tip is the last LRB answer, not the one most feeders agree on. The pull ladder and the per-feeder budgets are written for several feeders but have run with one only.
 - **Metrics** (12). Nothing is exported to Prometheus; `/status`, `/stats` and the dashboard are the only views.
 - **First sync from genesis.** Only run so far from a snapshot, a few hundred slots of history. A full first sync fetches the branch list of the whole history from feeders whose txstore reaches genesis: the same code, not yet run at that scale.

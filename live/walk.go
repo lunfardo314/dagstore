@@ -76,9 +76,18 @@ func (n *Node) walk(bid int64, canonical bool, from []int64) error {
 			state        int
 			confirmingNo sql.NullInt64
 		)
-		if err := n.queryRow(`SELECT t.txid, t.slot, t.state, cb.canonical_no FROM tx t LEFT JOIN branch cb ON cb.tx = t.confirming_branch
-			WHERE t.id = ?`, id).Scan(&txid, &slot, &state, &confirmingNo); err != nil {
+		var parsed bool
+		if err := n.queryRow(`SELECT t.txid, t.slot, t.state, t.parsed, cb.canonical_no FROM tx t LEFT JOIN branch cb ON cb.tx = t.confirming_branch
+			WHERE t.id = ?`, id).Scan(&txid, &slot, &state, &parsed, &confirmingNo); err != nil {
 			return err
+		}
+		if state == store.StateIntake && !parsed {
+			// stored unparsed, of a library not held: the walk waits for the pass that parses it
+			// at the next start, without pulling it
+			if err := n.wait(id, bid, txid, state); err != nil {
+				return err
+			}
+			continue
 		}
 		switch state {
 		case store.StatePruned:
@@ -100,7 +109,13 @@ func (n *Node) walk(bid int64, canonical bool, from []int64) error {
 				return err
 			}
 			if !ok {
-				if err = n.wait(id, bid, txid, store.StateMissing); err != nil {
+				// refused bytes are missing again and pulled; bytes of a library not held stay in
+				// intake, unparsed, and the walk waits for the restart that parses them
+				var now int
+				if err = n.queryRow(`SELECT state FROM tx WHERE id = ?`, id).Scan(&now); err != nil {
+					return err
+				}
+				if err = n.wait(id, bid, txid, now); err != nil {
 					return err
 				}
 				continue
@@ -208,6 +223,9 @@ func (n *Node) link(id, bid int64, canonical bool) (deps []int64, ok bool, err e
 		return nil, false, err
 	}
 	tx, err := transaction.Parse(raw)
+	if errors.Is(err, transaction.ErrTxVersionMismatch) {
+		return nil, false, nil
+	}
 	if err == nil {
 		_, err = tx.VerifySignature()
 	}
@@ -390,8 +408,9 @@ func (n *Node) sealStep() error {
 	rows.Close()
 	for _, c := range cands {
 		var pending, gaps int64
-		if err = n.queryRow(`SELECT coalesce(sum(t.state = ?), 0), count(*) FROM waiting w JOIN tx t ON t.id = w.tx WHERE w.branch = ?`,
-			store.StateMissing, c.tx).Scan(&pending, &gaps); err != nil {
+		// pending: what is still to come, missing or stored unparsed; lost is a gap, not pending
+		if err = n.queryRow(`SELECT coalesce(sum(t.state IN (?, ?)), 0), count(*) FROM waiting w JOIN tx t ON t.id = w.tx WHERE w.branch = ?`,
+			store.StateMissing, store.StateIntake, c.tx).Scan(&pending, &gaps); err != nil {
 			return err
 		}
 		if pending > 0 {

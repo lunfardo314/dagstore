@@ -1,8 +1,11 @@
 package live
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -14,7 +17,7 @@ import (
 
 // counters of the intake, written by peering's goroutines and the loop, read by the API
 var (
-	cntPushed, cntPulledIn, cntDuplicate, cntNotFeeder, cntBadBytes, cntStored, cntVersionMismatch atomic.Int64
+	cntPushed, cntPulledIn, cntDuplicate, cntNotFeeder, cntBadBytes, cntStored, cntVersionMismatch, cntUnparsed atomic.Int64
 )
 
 // onTxBytes is peering's gossip callback. Only feeders are heard (SPEC.md section 5.3); copies of
@@ -32,10 +35,13 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 	}
 	tx, err := transaction.Parse(txBytes)
 	if errors.Is(err, transaction.ErrTxVersionMismatch) {
-		// a feeder pushes only what it accepted: the network runs a library this dagstore lacks
-		n.gate.Unsee(txid)
+		// A feeder pushes only what it accepted: the network runs a library this dagstore lacks.
+		// The bytes are kept under the feeder's txid, which can be trusted from a feeder, and
+		// parsed after the restart that loads the library.
+		n.gate.Accept(txid)
 		cntVersionMismatch.Add(1)
-		n.libs.Alarm("feeders send transactions of a library this dagstore does not have: " + err.Error())
+		n.libs.Alarm("feeders send transactions of a library this dagstore does not have, stored unparsed: " + err.Error())
+		n.in <- received{from: from, txid: txid, raw: txBytes, pulled: pulled}
 		return
 	}
 	if err != nil || tx.ID() != txid {
@@ -49,7 +55,7 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 	} else {
 		cntPushed.Add(1)
 	}
-	n.in <- received{from: from, tx: tx, pulled: pulled}
+	n.in <- received{from: from, tx: tx, txid: txid, raw: txBytes, pulled: pulled}
 }
 
 // onPullRequest answers a peer's pull from the database: any age, since the dagstore keeps it all.
@@ -63,7 +69,10 @@ func (n *Node) onPullRequest(from peer.ID, txid base.TransactionID) {
 // intake stores a received transaction. A transaction already stored is ignored; one that was a
 // placeholder (missing, lost) gets its bytes, and the walks waiting for it resume.
 func (n *Node) intake(r received) error {
-	txid := r.tx.ID()
+	txid := r.txid
+	if r.tx != nil {
+		txid = r.tx.ID()
+	}
 	delete(n.pulls, txid)
 	id, state, err := n.lookup(txid)
 	if err != nil {
@@ -85,27 +94,98 @@ func (n *Node) intake(r received) error {
 	default:
 		return nil
 	}
-	var seq any
-	if chainID, ok := store.SequencerID(r.tx); ok {
-		if seq, err = n.chainRow(chainID, store.ChainSequencer); err != nil {
-			return err
-		}
+	raw := r.raw
+	if r.tx != nil {
+		raw = r.tx.Bytes()
 	}
-	raw := r.tx.Bytes()
-	if _, err = n.exec(`UPDATE tx SET kind = ?, sequencer = ?, size = ?, state = ?, source = ?, received_at = ? WHERE id = ?`,
-		store.TxKind(r.tx), seq, len(raw), store.StateIntake, source, time.Now().Unix(), id); err != nil {
+	if _, err = n.exec(`UPDATE tx SET size = ?, state = ?, parsed = 0, source = ?, received_at = ? WHERE id = ?`,
+		len(raw), store.StateIntake, source, time.Now().Unix(), id); err != nil {
 		return err
 	}
 	if _, err = n.exec(`INSERT OR REPLACE INTO tx_bytes(id, bytes) VALUES (?, ?)`, id, raw); err != nil {
 		return err
 	}
 	cntStored.Add(1)
-	if r.tx.IsBranchTransaction() {
-		if err = n.branchArrived(id, r.tx); err != nil {
+	if r.tx == nil {
+		cntUnparsed.Add(1)
+		return nil
+	}
+	return n.parsed(id, r.tx)
+}
+
+// parsed records what parsing tells of a stored transaction: its kind and sequencer, its branch row
+// for a branch, and then resumes the walks that waited for it.
+func (n *Node) parsed(id int64, tx *transaction.Transaction) error {
+	var seq any
+	var err error
+	if chainID, ok := store.SequencerID(tx); ok {
+		if seq, err = n.chainRow(chainID, store.ChainSequencer); err != nil {
+			return err
+		}
+	}
+	if _, err = n.exec(`UPDATE tx SET kind = ?, sequencer = ?, parsed = 1 WHERE id = ?`, store.TxKind(tx), seq, id); err != nil {
+		return err
+	}
+	if tx.IsBranchTransaction() {
+		if err = n.branchArrived(id, tx); err != nil {
 			return err
 		}
 	}
 	return n.resumeWaiting(id)
+}
+
+// parsePending parses, at start, what was stored unparsed: the libraries loaded now may include the
+// one it needs. A transaction still of a library not held stays unparsed; one whose bytes do not
+// parse or do not hash to the feeder's txid is deleted, and pulled again if a walk needs it.
+func (n *Node) parsePending() error {
+	rows, err := n.query(`SELECT t.id, t.txid, b.bytes FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.state = ? AND t.parsed = 0`, store.StateIntake)
+	if err != nil {
+		return err
+	}
+	type pending struct {
+		id   int64
+		txid []byte
+		raw  []byte
+	}
+	var ps []pending
+	for rows.Next() {
+		var p pending
+		if err = rows.Scan(&p.id, &p.txid, &p.raw); err != nil {
+			rows.Close()
+			return err
+		}
+		ps = append(ps, p)
+	}
+	rows.Close()
+	var done, still, bad int
+	for _, p := range ps {
+		tx, err := transaction.Parse(p.raw)
+		switch {
+		case errors.Is(err, transaction.ErrTxVersionMismatch):
+			still++
+			continue
+		case err != nil || !txidIs(tx, p.txid):
+			bad++
+			if _, err = n.exec(`DELETE FROM tx_bytes WHERE id = ?`, p.id); err != nil {
+				return err
+			}
+			if _, err = n.exec(`UPDATE tx SET state = ? WHERE id = ?`, store.StateMissing, p.id); err != nil {
+				return err
+			}
+			continue
+		}
+		if err = n.parsed(p.id, tx); err != nil {
+			return err
+		}
+		done++
+	}
+	if len(ps) > 0 {
+		slog.Info("unparsed transactions parsed", "parsed", done, "still_unparsed", still, "bad", bad)
+	}
+	if still > 0 {
+		n.libs.Alarm(fmt.Sprintf("%d stored transactions are of a library this dagstore does not have", still))
+	}
+	return nil
 }
 
 // lookup returns the row id and state of txid, id 0 if it has no row.
@@ -170,4 +250,9 @@ func (n *Node) dictRow(table, column string, value any) (int64, error) {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func txidIs(tx *transaction.Transaction, txid []byte) bool {
+	id := tx.ID()
+	return bytes.Equal(id[:], txid)
 }

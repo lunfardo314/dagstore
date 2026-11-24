@@ -136,6 +136,9 @@ func (l *Libraries) Added(libs []store.Library) {
 
 // Alarm raises an alarm, shown in /status and on the dashboard until restart; the same text once.
 func (l *Libraries) Alarm(msg string) {
+	if l == nil {
+		return // a node built without libraries, in tests
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.alarmIndex[msg] {

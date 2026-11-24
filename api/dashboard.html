@@ -165,6 +165,7 @@ function renderStatus(st) {
     ["Linked", `${rate("linked")} <span class="muted">(${num(lv.linked)})</span>`],
     ["Refused", `${num(lv.bad_bytes)} bad bytes, ${num(lv.sig_failed)} bad signatures, ${num(lv.version_mismatch)} of a library not held, ${num(lv.not_from_feeders)} not from feeders`,
       lv.bad_bytes || lv.sig_failed || lv.version_mismatch ? "warn" : ""],
+    ["Stored unparsed", `${num(lv.stored_unparsed)} <span class="muted">(of a library not held; parsed at the next start)</span>`, lv.stored_unparsed ? "warn" : ""],
     ["Intake queue", num(lv.intake_queue)],
   ] : [
     ["Intake (unlinked)", num(st.intake)],

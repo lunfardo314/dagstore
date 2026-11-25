@@ -259,7 +259,9 @@ A transaction whose version the dagstore's libraries do not know raises an alarm
 
 **Checked by replay.** `live/TestReplay` feeds 500 to 600 slots of a real txstore through the intake, the heaviest branch of each slot taken as the LRB, and compares with the offline importer's database of the same txstore. The two agree exactly away from the ends of the range: canonical lineage, the confirmations of every canonical branch, and every kept transaction. That held in order, and with one transaction in seven, branches included, delivered 160 slots late. No edge dangles after the orphan purge. Speed: about 2,000 to 3,000 transactions a second on one core.
 
-**Not built yet:** the LRB most feeders agree on (with several feeders the last answer wins); broad pulls; renumbering after a real fork (the canonical tip stops moving and an error is logged); replication and the source side of section 5.4; archive segments.
+**Several feeders.** Each feeder's latest LRB answer is kept with its age; answers older than three polls do not count. A candidate is supported by every feeder whose LRB has it on its lineage, so feeders a slot or two apart on one lineage agree; the tip is the newest candidate a majority supports, and without a majority it holds where it is, with a warning. The branch list fetch waits for every alive feeder's first answer (at most 15 s), starts at the oldest slot any of them holds, and asks a feeder whose txstore reaches the slots requested. A pull starts at the feeder chosen by the transaction's slot and goes round the feeders on timeouts, skipping those not alive; each feeder's budget per second is kept. `/status` and the dashboard show each feeder: alive, its LRB and age, how far back its txstore reaches, pushes, pulls answered and sent, timeouts. The selection rules are unit-tested; live, only one feeder has been run so far.
+
+**Not built yet:** broad pulls; renumbering after a real fork (the canonical tip stops moving and an error is logged); replication and the source side of section 5.4; archive segments.
 
 ## 7. Libraries, network identity, and the nodes' txstore
 

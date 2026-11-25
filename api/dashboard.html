@@ -150,7 +150,13 @@ function renderStatus(st) {
   ]);
   rows("feeders", lv ? [
     ["Feeders alive", `${lv.feeders_alive} of ${lv.feeders}`, lv.feeders_alive ? "ok" : "bad"],
-    ["Their txstore", bf.started ? `from slot ${num(bf.feeder_oldest_slot)}, purge floor ${bf.feeder_purge_floor ? num(bf.feeder_purge_floor) : "none"}` : "—"],
+    ...(lv.feeder_list || []).map(f => [
+      `…${f.peer.slice(-8)}`,
+      `<span class="${f.alive ? "ok" : "bad"}">${f.alive ? "alive" : "down"}</span>` +
+      (f.lrb_slot ? `, LRB ${num(f.lrb_slot)} (${esc(f.lrb_age)} ago)` : ", no LRB yet") +
+      `<br><span class="muted">txstore from ${f.oldest_slot ? num(f.oldest_slot) : "—"}` +
+      (f.purge_floor ? `, purge floor ${num(f.purge_floor)}` : "") +
+      `; ${num(f.pushes)} pushed, ${num(f.pulled_in)} of ${num(f.pulls_sent)} pulls answered, ${num(f.timeouts)} timeouts</span>`]),
     ["Replicas", '<span class="muted">none declared</span>'],
   ] : [["Feeders", '<span class="muted">none declared</span>'], ["Replicas", '<span class="muted">none declared</span>']]);
   const rate = k => {

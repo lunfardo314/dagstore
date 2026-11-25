@@ -50,10 +50,13 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 		return
 	}
 	n.gate.Accept(txid)
+	fd := n.feederByID[from]
 	if pulled {
 		cntPulledIn.Add(1)
+		fd.pulledIn.Add(1)
 	} else {
 		cntPushed.Add(1)
+		fd.pushes.Add(1)
 	}
 	n.in <- received{from: from, tx: tx, txid: txid, raw: txBytes, pulled: pulled}
 }

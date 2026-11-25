@@ -40,27 +40,42 @@ type branchPoint struct {
 // LiveStatus is the live process's state: its feeders, their LRB, the branch list fetch, the
 // history walker and the intake counters (cumulative since start).
 type LiveStatus struct {
-	Feeders         int         `json:"feeders"`
-	FeedersAlive    int         `json:"feeders_alive"`
-	LRB             string      `json:"lrb,omitempty"`
-	LRBSlot         uint32      `json:"lrb_slot,omitempty"`
-	BranchFetch     BranchFetch `json:"branch_fetch"`
-	WalkerSlot      *uint32     `json:"walker_slot,omitempty"`
-	PendingPulls    int         `json:"pending_pulls"`
-	Intake          int         `json:"intake_queue"`
-	Pushed          int64       `json:"pushed"`
-	PulledIn        int64       `json:"pulled_in"`
-	Duplicates      int64       `json:"duplicates"`
-	NotFromFeeders  int64       `json:"not_from_feeders"`
-	BadBytes        int64       `json:"bad_bytes"`
-	Stored          int64       `json:"stored"`
-	Linked          int64       `json:"linked"`
-	SigFailed       int64       `json:"sig_failed"`
-	PullsSent       int64       `json:"pulls_sent"`
-	Lost            int64       `json:"lost"`
-	Purged          int64       `json:"purged_orphans"`
-	VersionMismatch int64       `json:"version_mismatch"`
-	Unparsed        int64       `json:"stored_unparsed"`
+	Feeders         int            `json:"feeders"`
+	FeedersAlive    int            `json:"feeders_alive"`
+	FeederList      []FeederStatus `json:"feeder_list"`
+	LRB             string         `json:"lrb,omitempty"`
+	LRBSlot         uint32         `json:"lrb_slot,omitempty"`
+	BranchFetch     BranchFetch    `json:"branch_fetch"`
+	WalkerSlot      *uint32        `json:"walker_slot,omitempty"`
+	PendingPulls    int            `json:"pending_pulls"`
+	Intake          int            `json:"intake_queue"`
+	Pushed          int64          `json:"pushed"`
+	PulledIn        int64          `json:"pulled_in"`
+	Duplicates      int64          `json:"duplicates"`
+	NotFromFeeders  int64          `json:"not_from_feeders"`
+	BadBytes        int64          `json:"bad_bytes"`
+	Stored          int64          `json:"stored"`
+	Linked          int64          `json:"linked"`
+	SigFailed       int64          `json:"sig_failed"`
+	PullsSent       int64          `json:"pulls_sent"`
+	Lost            int64          `json:"lost"`
+	Purged          int64          `json:"purged_orphans"`
+	VersionMismatch int64          `json:"version_mismatch"`
+	Unparsed        int64          `json:"stored_unparsed"`
+}
+
+// FeederStatus is one feeder as the live process sees it.
+type FeederStatus struct {
+	Peer       string `json:"peer"`
+	Alive      bool   `json:"alive"`
+	LRBSlot    uint32 `json:"lrb_slot,omitempty"`
+	LRBAge     string `json:"lrb_age,omitempty"`
+	OldestSlot uint32 `json:"oldest_slot,omitempty"`
+	PurgeFloor uint32 `json:"purge_floor,omitempty"`
+	Pushes     int64  `json:"pushes"`
+	PulledIn   int64  `json:"pulled_in"`
+	PullsSent  int64  `json:"pulls_sent"`
+	Timeouts   int64  `json:"timeouts"`
 }
 
 type BranchFetch struct {

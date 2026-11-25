@@ -19,7 +19,7 @@ var cntLinked, cntSigFailed, cntPullsSent, cntLost, cntPurged atomic.Int64
 // turn, each given PullTimeout; a round is all of them, MissingRetryInterval apart, and after
 // MissingRetryRounds rounds the transaction is declared lost. Broad pulls are not built.
 type pullState struct {
-	feeder   int
+	tried    int // feeders tried in this round; the next is pullFeeder(txid, tried)
 	inFlight bool
 	sentAt   time.Time
 	nextAt   time.Time
@@ -42,30 +42,43 @@ func (n *Node) wantPullFirst(txid base.TransactionID) {
 // pullOne sends at most one pull, the pace being set by the caller's ticker. It handles timeouts
 // first, then pulls a lineage branch due if there is one, else the oldest transaction due: sealing
 // advances in slot order, so the oldest needs are the ones holding it up, and a txid begins with
-// its slot.
+// its slot. A feeder that is not alive is skipped, as tried; a feeder whose budget for this second
+// is spent is passed over until the next.
 func (n *Node) pullOne() error {
 	now := time.Now()
 	var due *base.TransactionID
+	var dueFeeder *feeder
 	for txid, p := range n.pulls {
 		if p.inFlight {
 			if now.Sub(p.sentAt) < n.params.PullTimeout {
 				continue
 			}
 			p.inFlight = false
-			if p.feeder++; p.feeder == len(n.feeders) {
-				p.feeder = 0
-				p.rounds++
-				if err := n.endOfRound(txid, p); err != nil {
-					return err
-				}
-				continue
-			}
+			n.feeders[pullFeeder(txid, p.tried, len(n.feeders))].timeouts.Add(1)
+			p.tried++
 			p.nextAt = now
 		}
-		if !now.Before(p.nextAt) && (due == nil || p.lineage && !n.pulls[*due].lineage ||
-			p.lineage == n.pulls[*due].lineage && bytes.Compare(txid[:], due[:]) < 0) {
+		if now.Before(p.nextAt) {
+			continue // not due: between rounds, nothing is tried, not even skipped
+		}
+		for p.tried < len(n.feeders) && !n.peers.IsAlive(n.feeders[pullFeeder(txid, p.tried, len(n.feeders))].id) {
+			p.tried++
+		}
+		if p.tried >= len(n.feeders) {
+			p.tried = 0
+			p.rounds++
+			if err := n.endOfRound(txid, p); err != nil {
+				return err
+			}
+			continue
+		}
+		fd := n.feeders[pullFeeder(txid, p.tried, len(n.feeders))]
+		if now.Sub(fd.budgetAt) < time.Second && fd.budgetUsed >= n.params.PullsPerSecondPerFeeder {
+			continue
+		}
+		if due == nil || p.lineage && !n.pulls[*due].lineage || p.lineage == n.pulls[*due].lineage && bytes.Compare(txid[:], due[:]) < 0 {
 			id := txid
-			due = &id
+			due, dueFeeder = &id, fd
 		}
 	}
 	if due == nil {
@@ -73,8 +86,13 @@ func (n *Node) pullOne() error {
 	}
 	p := n.pulls[*due]
 	n.gate.AddPulled(*due)
-	if n.peers.PullTransactionFromPeer(n.feeders[p.feeder], *due) {
+	if n.peers.PullTransactionFromPeer(dueFeeder.id, *due) {
 		p.inFlight, p.sentAt = true, now
+		if now.Sub(dueFeeder.budgetAt) >= time.Second {
+			dueFeeder.budgetAt, dueFeeder.budgetUsed = now, 0
+		}
+		dueFeeder.budgetUsed++
+		dueFeeder.pullsSent.Add(1)
 		cntPullsSent.Add(1)
 	}
 	return nil
@@ -158,10 +176,17 @@ func (n *Node) updateInfo() {
 		Unparsed:        cntUnparsed.Load(),
 		Intake:          len(n.in),
 	}
-	for _, id := range n.feeders {
-		if n.peers.IsAlive(id) {
+	for _, fd := range n.feeders {
+		fs := api.FeederStatus{Peer: fd.id.String(), Alive: n.peers.IsAlive(fd.id), OldestSlot: fd.oldest, PurgeFloor: fd.floor,
+			Pushes: fd.pushes.Load(), PulledIn: fd.pulledIn.Load(), PullsSent: fd.pullsSent.Load(), Timeouts: fd.timeouts.Load()}
+		if fs.Alive {
 			info.FeedersAlive++
 		}
+		if fd.lrb != nil {
+			fs.LRBSlot = fd.lrb.Slot()
+			fs.LRBAge = time.Since(fd.lrbAt).Round(time.Second).String()
+		}
+		info.FeederList = append(info.FeederList, fs)
 	}
 	if n.lrb != nil {
 		info.LRB = n.lrb.StringHex()

@@ -1,6 +1,7 @@
 package live
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"log/slog"
@@ -28,6 +29,7 @@ type (
 	// arrive by push. A restart fetches the gap again from where it stopped.
 	branchFetch struct {
 		started, done  bool
+		firstAnswerAt  time.Time // the first LRB answer; the fetch starts when all feeders answered or a while after it
 		next, target   uint32
 		inFlight       bool
 		sentAt         time.Time
@@ -41,19 +43,20 @@ type (
 const (
 	branchListPause   = 3 * time.Second  // between two requests, as in the spec's pace
 	branchListTimeout = 30 * time.Second // a request unanswered this long is sent again
+	branchListWait    = 15 * time.Second // how long the fetch waits for every feeder's first LRB answer
 )
 
 func (n *Node) pollLRB() {
 	n.lrbAskedAt = time.Now()
-	for _, id := range n.feeders {
-		n.peers.SendPullLRB(id)
+	for _, f := range n.feeders {
+		n.peers.SendPullLRB(f.id)
 	}
 }
 
 func (n *Node) onLineage(m any) error {
 	switch m := m.(type) {
 	case lrbMsg:
-		return n.onLRB(m.r)
+		return n.onLRB(m.from, m.r)
 	case branchListMsg:
 		return n.onBranchList(m.r)
 	case librariesFetched:
@@ -62,20 +65,16 @@ func (n *Node) onLineage(m any) error {
 	return nil
 }
 
-// onLRB takes a feeder's latest reliable branch as the tip. With one feeder its answer is the
-// tip; with several, the one most feeders agree on is meant (not built yet: the last answer wins).
-func (n *Node) onLRB(r peering.LRBReply) error {
+// onLRB records a feeder's LRB answer and moves the tip to the LRB the feeders agree on.
+func (n *Node) onLRB(from peer.ID, r peering.LRBReply) error {
+	fd := n.feederByID[from]
+	if fd == nil {
+		return nil
+	}
 	lrb := r.LRB
-	n.lrb = &lrb
-	f := &n.branchFetch
-	f.feederOldest, f.feederFloor = r.OldestSlot, r.PurgeFloor
-	if !f.started {
-		f.started = true
-		f.target = lrb.Slot()
-		if f.next == 0 || f.next < r.OldestSlot {
-			f.next = r.OldestSlot
-		}
-		slog.Info("branch list fetch", "from_slot", f.next, "to_slot", f.target)
+	fd.lrb, fd.lrbAt, fd.oldest, fd.floor = &lrb, time.Now(), r.OldestSlot, r.PurgeFloor
+	if n.branchFetch.firstAnswerAt.IsZero() {
+		n.branchFetch.firstAnswerAt = time.Now()
 	}
 	if _, _, err := n.rowOf(lrb); err != nil {
 		return err
@@ -83,7 +82,81 @@ func (n *Node) onLRB(r peering.LRBReply) error {
 	if _, state, _ := n.lookup(lrb); state == store.StateMissing {
 		n.wantPullFirst(lrb)
 	}
+	var lrbs []base.TransactionID
+	for _, f := range n.feeders {
+		if f.lrb != nil && time.Since(f.lrbAt) < lrbFresh {
+			lrbs = append(lrbs, *f.lrb)
+		}
+	}
+	picked, ok := pickLRB(lrbs, n.lineageHas)
+	if !ok {
+		if time.Since(n.noMajorityLogged) > 10*time.Minute {
+			n.noMajorityLogged = time.Now()
+			slog.Warn("the feeders do not agree on an LRB: tip held", "feeders_answering", len(lrbs))
+		}
+		return n.startBranchFetch()
+	}
+	n.lrb = &picked
+	if err := n.startBranchFetch(); err != nil {
+		return err
+	}
 	return n.updateCanonical()
+}
+
+// lineageHas tells whether branch a is branch b or one of its predecessors in the branch table.
+// A lineage broken by a branch not stored yet does not reach a.
+func (n *Node) lineageHas(a, b base.TransactionID) bool {
+	if a == b {
+		return true
+	}
+	cur, _, err := n.lookup(b)
+	if err != nil || cur == 0 {
+		return false
+	}
+	for {
+		var slot uint32
+		var pred sql.NullInt64
+		if err = n.queryRow(`SELECT slot, predecessor FROM branch WHERE tx = ?`, cur).Scan(&slot, &pred); err != nil || !pred.Valid || slot <= a.Slot() {
+			return false
+		}
+		var txid []byte
+		if err = n.queryRow(`SELECT txid FROM tx WHERE id = ?`, pred.Int64).Scan(&txid); err != nil {
+			return false
+		}
+		if bytes.Equal(txid, a[:]) {
+			return true
+		}
+		cur = pred.Int64
+	}
+}
+
+// startBranchFetch starts the branch list fetch once every alive feeder has answered PullLRB, or a
+// while after the first answer: from the oldest slot any feeder's txstore holds to the newest LRB.
+func (n *Node) startBranchFetch() error {
+	f := &n.branchFetch
+	if f.started || f.firstAnswerAt.IsZero() {
+		return nil
+	}
+	oldest, target, answered, alive := ^uint32(0), uint32(0), 0, 0
+	for _, fd := range n.feeders {
+		if n.peers.IsAlive(fd.id) {
+			alive++
+		}
+		if fd.lrb != nil {
+			answered++
+			oldest, target = min(oldest, fd.oldest), max(target, fd.lrb.Slot())
+		}
+	}
+	if answered < alive && time.Since(f.firstAnswerAt) < branchListWait {
+		return nil
+	}
+	f.started, f.target = true, target
+	if f.next == 0 || f.next < oldest {
+		f.next = oldest
+	}
+	f.feederOldest = oldest
+	slog.Info("branch list fetch", "from_slot", f.next, "to_slot", f.target, "feeders_answered", answered)
+	return nil
 }
 
 // refetchBranches fetches the branch list again from the canonical tip up to slot to, unless a
@@ -98,10 +171,14 @@ func (n *Node) refetchBranches(to uint32) {
 	slog.Info("lineage gap: branch list fetched again", "from_slot", f.next, "to_slot", to)
 }
 
-// fetchBranchesStep sends the next branch list request when none is in flight.
+// fetchBranchesStep sends the next branch list request when none is in flight, to a feeder whose
+// txstore reaches the slots asked.
 func (n *Node) fetchBranchesStep() error {
 	f := &n.branchFetch
-	if !f.started || f.done {
+	if !f.started {
+		return n.startBranchFetch()
+	}
+	if f.done {
 		return nil
 	}
 	if f.inFlight && time.Since(f.sentAt) < branchListTimeout {
@@ -117,8 +194,13 @@ func (n *Node) fetchBranchesStep() error {
 		slog.Info("branch list fetch done", "entries", f.entriesFetched)
 		return n.updateCanonical()
 	}
+	k := branchListFeeder(n.feeders, f.feeder, f.next, func(fd *feeder) bool { return n.peers.IsAlive(fd.id) })
+	if k < 0 {
+		return nil
+	}
+	f.feeder = k
 	to := min(f.next+uint32(n.params.BranchListMaxSlots)-1, f.target)
-	f.inFlight, f.sentAt = n.peers.SendPullBranchList(n.feeders[f.feeder], f.next, to), time.Now()
+	f.inFlight, f.sentAt = n.peers.SendPullBranchList(n.feeders[k].id, f.next, to), time.Now()
 	return nil
 }
 

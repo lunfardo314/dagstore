@@ -4,7 +4,7 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 
 ## Before a real deployment
 
-- **Several feeders** (6.2, 6.3). The tip is the last LRB answer, not the one most feeders agree on. The pull ladder and the per-feeder budgets are written for several feeders but have run with one only.
+- **A live run with several feeders.** The tip by agreement, the pull ladder across feeders and the per-feeder budgets are built and unit-tested (SPEC 6.7) but have run live with one feeder only.
 - **Metrics** (12). Nothing is exported to Prometheus; `/status`, `/stats` and the dashboard are the only views.
 - **First sync from genesis.** Only run so far from a snapshot, a few hundred slots of history. A full first sync fetches the branch list of the whole history from feeders whose txstore reaches genesis: the same code, not yet run at that scale.
 
@@ -16,7 +16,7 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 - **Archive segments and pruning** (8.3). No export of old ranges to compressed segments, no import of a segment, no deleting a range; `PRAGMA incremental_vacuum` never runs.
 - **Compression of transaction bytes** (8.2.1). Raw bytes are about three quarters of the database; zstd with a dictionary is the first thing to try.
 - **`proxi dagstore` commands** (10.9), a client of the query API.
-- **Dashboard**: per-feeder figures (pushes, pulls served, timeouts, last contact) and replicas (11.1).
+- **Dashboard**: replicas (11.1). Per-feeder figures are shown.
 
 ## Node side, built but not rehearsed
 

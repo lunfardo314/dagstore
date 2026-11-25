@@ -31,15 +31,16 @@ import (
 const commitPeriod = time.Second
 
 type Node struct {
-	db      *sql.DB // the write connection, used by the loop goroutine only
-	rdb     *sql.DB // read connections, for answering peers' pulls
-	tx      *sql.Tx
-	stmts   map[string]*sql.Stmt
-	params  dagstore.Params
-	env     *global.Global
-	peers   *peering.Peers
-	feeders []peer.ID
-	gate    *ingate.Gate[base.TransactionID]
+	db         *sql.DB // the write connection, used by the loop goroutine only
+	rdb        *sql.DB // read connections, for answering peers' pulls
+	tx         *sql.Tx
+	stmts      map[string]*sql.Stmt
+	params     dagstore.Params
+	env        *global.Global
+	peers      *peering.Peers
+	feeders    []*feeder
+	feederByID map[peer.ID]*feeder
+	gate       *ingate.Gate[base.TransactionID]
 
 	in         chan received
 	lineage    chan any // lineage replies of the feeders and fetched libraries, for the loop
@@ -47,13 +48,14 @@ type Node struct {
 	libraryAPI string
 
 	// state of the loop goroutine
-	startSlot   uint32 // slot of the starting branch, 0 until it is known
-	walkedNo    int64  // the newest canonical branch walked, and its slot
-	walkedSlot  uint32
-	lrb         *base.TransactionID
-	lrbAskedAt  time.Time
-	branchFetch branchFetch
-	pulls       map[base.TransactionID]*pullState
+	startSlot        uint32 // slot of the starting branch, 0 until it is known
+	walkedNo         int64  // the newest canonical branch walked, and its slot
+	walkedSlot       uint32
+	lrb              *base.TransactionID
+	lrbAskedAt       time.Time
+	noMajorityLogged time.Time
+	branchFetch      branchFetch
+	pulls            map[base.TransactionID]*pullState
 
 	mu   sync.Mutex // guards info, read by the API
 	info api.LiveStatus
@@ -220,13 +222,16 @@ func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params, libs *a
 		libs:       libs,
 		libraryAPI: libraryAPI,
 		pulls:      make(map[base.TransactionID]*pullState),
+		feederByID: make(map[peer.ID]*feeder),
 	}
 	for _, name := range cfg.Feeders {
 		info, err := peer.AddrInfoFromP2pAddr(cfg.PreConfiguredPeers[name].Multiaddr)
 		if err != nil {
 			return nil, fmt.Errorf("peering.feeders: '%s': %w", name, err)
 		}
-		n.feeders = append(n.feeders, info.ID)
+		fd := &feeder{id: info.ID}
+		n.feeders = append(n.feeders, fd)
+		n.feederByID[info.ID] = fd
 	}
 	peers.OnReceiveTxBytes(n.onTxBytes)
 	peers.OnReceivePullTxRequest(n.onPullRequest)

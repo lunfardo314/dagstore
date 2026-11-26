@@ -13,7 +13,7 @@ import (
 	"github.com/lunfardo314/proxima/ledger/base"
 )
 
-var cntLinked, cntSigFailed, cntPullsSent, cntLost, cntPurged atomic.Int64
+var cntLinked, cntSigFailed, cntPullsSent, cntLost, cntPurged, cntTipHeld atomic.Int64
 
 // pullState is the pull ladder of one missing transaction (SPEC.md section 6.3): the feeders in
 // turn, each given PullTimeout; a round is all of them, MissingRetryInterval apart, and after
@@ -54,14 +54,14 @@ func (n *Node) pullOne() error {
 				continue
 			}
 			p.inFlight = false
-			n.feeders[pullFeeder(txid, p.tried, len(n.feeders))].timeouts.Add(1)
+			n.feeders[pullFeeder(txid, p.tried, len(n.feeders))].timedOut(now)
 			p.tried++
 			p.nextAt = now
 		}
 		if now.Before(p.nextAt) {
 			continue // not due: between rounds, nothing is tried, not even skipped
 		}
-		for p.tried < len(n.feeders) && !n.peers.IsAlive(n.feeders[pullFeeder(txid, p.tried, len(n.feeders))].id) {
+		for p.tried < len(n.feeders) && !n.pullable(n.feeders[pullFeeder(txid, p.tried, len(n.feeders))], now) {
 			p.tried++
 		}
 		if p.tried >= len(n.feeders) {
@@ -96,6 +96,12 @@ func (n *Node) pullOne() error {
 		cntPullsSent.Add(1)
 	}
 	return nil
+}
+
+// pullable tells whether pulls may go to the feeder: alive for peering, and not paused for not
+// answering.
+func (n *Node) pullable(f *feeder, now time.Time) bool {
+	return n.peers.IsAlive(f.id) && !now.Before(f.pausedUntil)
 }
 
 // endOfRound records a round of the ladder that found nothing, and declares the transaction lost
@@ -174,6 +180,7 @@ func (n *Node) updateInfo() {
 		Purged:          cntPurged.Load(),
 		VersionMismatch: cntVersionMismatch.Load(),
 		Unparsed:        cntUnparsed.Load(),
+		TipHeld:         cntTipHeld.Load(),
 		Intake:          len(n.in),
 	}
 	for _, fd := range n.feeders {

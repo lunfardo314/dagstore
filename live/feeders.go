@@ -20,6 +20,25 @@ type feeder struct {
 	budgetUsed int
 
 	pushes, pulledIn, pullsSent, timeouts atomic.Int64
+	// silentPulls counts pulls timed out in a row, reset by any pull it answers; at
+	// silentPullsMax the feeder is passed over for silentPause, so the ladder does not wait out a
+	// timeout per pull on a feeder that has gone away but which peering still counts alive
+	silentPulls atomic.Int64
+	pausedUntil time.Time
+}
+
+const (
+	silentPullsMax = 5
+	silentPause    = 30 * time.Second
+)
+
+// timedOut records a pull this feeder did not answer.
+func (f *feeder) timedOut(now time.Time) {
+	f.timeouts.Add(1)
+	if f.silentPulls.Add(1) >= silentPullsMax {
+		f.silentPulls.Store(0)
+		f.pausedUntil = now.Add(silentPause)
+	}
 }
 
 // lrbFresh is how old a feeder's LRB answer may be and still count: three polls.

@@ -62,6 +62,7 @@ type LiveStatus struct {
 	Purged          int64          `json:"purged_orphans"`
 	VersionMismatch int64          `json:"version_mismatch"`
 	Unparsed        int64          `json:"stored_unparsed"`
+	TipHeld         int64          `json:"tip_held"` // LRB answers on which the feeders did not agree
 }
 
 // FeederStatus is one feeder as the live process sees it.

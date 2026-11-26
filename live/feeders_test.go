@@ -3,6 +3,7 @@ package live
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/lunfardo314/proxima/ledger/base"
 )
@@ -120,5 +121,33 @@ func TestBranchListFeeder(t *testing.T) {
 		if got := branchListFeeder(fs, c.start, c.slot, c.alive); got != c.want {
 			t.Errorf("%s: feeder %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// A feeder that leaves silentPullsMax pulls in a row unanswered is passed over for silentPause,
+// so pulls do not wait out a timeout each on a feeder that has gone; an answer in between resets
+// the count, so a healthy feeder missing a transaction now and then is not paused.
+func TestFeederPause(t *testing.T) {
+	now := time.Now()
+	f := &feeder{}
+	for i := 0; i < silentPullsMax-1; i++ {
+		f.timedOut(now)
+	}
+	if now.Before(f.pausedUntil) {
+		t.Fatalf("paused after %d silent pulls, want %d", silentPullsMax-1, silentPullsMax)
+	}
+	f.silentPulls.Store(0) // an answer
+	for i := 0; i < silentPullsMax-1; i++ {
+		f.timedOut(now)
+	}
+	if now.Before(f.pausedUntil) {
+		t.Fatalf("an answer in between did not reset the count")
+	}
+	f.timedOut(now)
+	if !now.Before(f.pausedUntil) || f.pausedUntil.Sub(now) != silentPause {
+		t.Fatalf("not paused for %v after %d silent pulls in a row", silentPause, silentPullsMax)
+	}
+	if f.timeouts.Load() != 2*(silentPullsMax-1)+1 {
+		t.Errorf("timeouts %d", f.timeouts.Load())
 	}
 }

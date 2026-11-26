@@ -90,6 +90,7 @@ func (n *Node) onLRB(from peer.ID, r peering.LRBReply) error {
 	}
 	picked, ok := pickLRB(lrbs, n.lineageHas)
 	if !ok {
+		cntTipHeld.Add(1)
 		if time.Since(n.noMajorityLogged) > 10*time.Minute {
 			n.noMajorityLogged = time.Now()
 			slog.Warn("the feeders do not agree on an LRB: tip held", "feeders_answering", len(lrbs))

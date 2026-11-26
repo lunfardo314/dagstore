@@ -54,6 +54,7 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 	if pulled {
 		cntPulledIn.Add(1)
 		fd.pulledIn.Add(1)
+		fd.silentPulls.Store(0)
 	} else {
 		cntPushed.Add(1)
 		fd.pushes.Add(1)

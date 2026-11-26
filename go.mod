@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/dgraph-io/badger/v4 v4.9.4
 	github.com/libp2p/go-libp2p v0.48.0
-	github.com/lunfardo314/proxima v1.7.6
+	github.com/lunfardo314/proxima v1.8.0
 	github.com/lunfardo314/unitrie v0.0.0-20261118094029-1b2fa7867ece
 	github.com/spf13/viper v1.21.0
 	modernc.org/sqlite v1.62.0

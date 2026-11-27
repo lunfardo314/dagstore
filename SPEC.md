@@ -222,7 +222,12 @@ A transaction at slot `s` that is not kept (in no stored branch's cone), once th
 
 **Branches are never purged (decided).** Every branch, canonical or not, stays with its cone, sealed by the same rule, for analysis of branch competition ([`kb/research/split_slots.md`](https://github.com/lunfardo314/proxima/blob/develop/kb/research/split_slots.md) and `branch-bias.md` needed exactly that). Measured on history of November 2026 from before library upgrade 7 (section 8.2.1), about 86 branches were produced per slot, nearly every sequencer branching every slot, so about 85 losing branches per slot; since upgrade 7 branching needs 20,000 PROX of own capital or 100,000 of coverage, so fewer are expected. What keeping them costs is measured in section 8.2.1 and reopened in section 13.
 
-`OrphanPurgeSlots` must exceed the longest delay with which a transaction can still enter a later canonical cone. Assumption to verify: node policy bounds that by the non-branch txID retention (`TxIDStateTTLSlots`, default 60, [`ledger/def_constants0.go`](https://github.com/lunfardo314/proxima/blob/develop/ledger/def_constants0.go)).
+**No bound on late inclusion (checked 2026-11-27).** Node policy does not bound how late a transaction can still enter a canonical cone. The non-branch txid retention (`TxIDStateTTLSlots`, 60 slots) concerns only transactions already committed: the attacher tests a dependency against the baseline's txid records and, finding none, takes it as not in the state, with no trust by age ([`core/attacher/attacher.go`](https://github.com/lunfardo314/proxima/blob/develop/core/attacher/attacher.go), `defineInTheStateStatus`). So a transaction never committed can be solidified and included at any later time, as long as its inputs are still unspent in the baseline: by a later transaction spending its outputs, or by its own bytes submitted again. Only two paths are bounded:
+
+- a tag-along, by the sequencer's backlog lifetime (`BacklogTagAlongTTLSlots`, at least 10);
+- an unsolicited sequencer transaction, dropped at ingress once older than the memDAG's ledger TTL (12 slots).
+
+**The purge is safe anyway**, because it is not final. When a later branch includes a purged transaction, the walk reaches the reference to it and finds no row. Its slot is inside the history held, so it gets a `missing` placeholder, the branch waits on it, and the pull ladder fetches it from the feeders. They hold it, since the node that included it had to solidify it, and that node also pushes it again once it is persisted. A premature purge costs a pull, never a loss. The exception is a transaction included only after its slot was pruned to the archive (section 8.3), weeks late: it lies below the starting branch and stays a `pruned` placeholder. `OrphanPurgeSlots` is therefore a trade-off between the size of intake and the number of such re-pulls, not a correctness bound.
 
 During the first sync, live pushes pile up in intake for slots the history walker has not reached. They stay until linked or purged; they are not orphans until the tip-relative rule says so, measured against the canonical tip, not the walker.
 
@@ -453,7 +458,7 @@ The test also found that the offline importer left its branches unwalked and wro
 | Name | Value | Why |
 |------|-------|-----|
 | `CanonicalDepthSlots` | 120 (about 20 min), never below 64 | A lineage is canonical only from this depth behind the LRB; split slots settle within a few slots. Tune on measurements ([`kb/research/split_slots.md`](https://github.com/lunfardo314/proxima/blob/develop/kb/research/split_slots.md)) |
-| `OrphanPurgeSlots` | 360 (about 1 h) | Must exceed the latest inclusion delay (section 6.5) |
+| `OrphanPurgeSlots` | 360 (about 1 h) | Intake size against re-pulls of transactions included later; no node policy bounds that delay, and a purged transaction included later is pulled again (section 6.5) |
 | `HeartbeatPeriod` | 30 s | As asked |
 | `BranchListMaxSlots` | 150 | One `PullBranchList` request: at the 86 branches a slot measured before library upgrade 7 (section 8.2.1), about 12,900 entries, 13 reply messages of up to 1,023 entries (64 KB) |
 | `PullTimeout` | 5 s | A feeder answers in well under a second; silence means it does not have it |

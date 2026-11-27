@@ -26,7 +26,6 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 ## Open decisions
 
 - **The cones of losing branches** (13): keep them all, as decided, or only the branch transactions. On a well-connected node after library upgrade 7, most of a history pass serves losing branches' cones; to be measured over a longer run before deciding.
-- **`OrphanPurgeSlots`** (6.5): rests on the assumption that node policy bounds how late a transaction can still be included. To verify in the node's code.
 - **Access to the query API**: unauthenticated, including the bulk `/export`. Keep it local or behind a proxy until decided.
 
 ## Smaller

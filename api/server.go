@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/lunfardo314/dagstore"
+	"github.com/lunfardo314/dagstore/archive"
 	"github.com/lunfardo314/dagstore/store"
 	"github.com/lunfardo314/proxima/api/dag_explorer"
 	"github.com/lunfardo314/proxima/ledger/base"
@@ -58,13 +59,15 @@ type Server struct {
 	Live func() *LiveStatus
 	// Libs are the ledger libraries in use, with their alarms
 	Libs *Libraries
+	// Codec decompresses the stored transaction bytes
+	Codec *store.Codec
 	// ExtraMetrics, when set, are served at /metrics beside the dagstore's own: in live mode the
 	// registry where proxima's peering keeps its metrics
 	ExtraMetrics prometheus.Gatherer
 }
 
-func New(db *sql.DB, cfg Config, libs *Libraries) *Server {
-	return &Server{db: db, cfg: cfg, started: time.Now(), Libs: libs}
+func New(db *sql.DB, cfg Config, libs *Libraries, codec *store.Codec) *Server {
+	return &Server{db: db, cfg: cfg, started: time.Now(), Libs: libs, Codec: codec}
 }
 
 // Handler returns the routes of the query API, the dashboard and the DAG explorer.
@@ -98,7 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /metrics", s.metricsHandler(s.ExtraMetrics))
 	dag_explorer.Register(func(path string, h func(http.ResponseWriter, *http.Request)) {
 		mux.HandleFunc("GET "+path, h)
-	}, &explorerStore{db: s.db})
+	}, &explorerStore{db: s.db, codec: s.Codec})
 	return s.logRequests(mux)
 }
 
@@ -302,9 +305,27 @@ func (s *Server) txRows(ctx context.Context, where string, args ...any) ([]*txRo
 func (s *Server) txRowByTxID(ctx context.Context, txid base.TransactionID) (*txRow, error) {
 	r, err := scanTxRow(s.db.QueryRowContext(ctx, txSelect+"WHERE t.txid = ?", txid[:]))
 	if errors.Is(err, sql.ErrNoRows) {
+		if seg := s.archiveSegment(txid.Slot()); seg != "" {
+			return nil, notFound("transaction %s is not in the store; its slot was pruned to archive segment %s", txid.StringShort(), seg)
+		}
 		return nil, notFound("transaction %s is not in the store", txid.StringShort())
 	}
 	return r, err
+}
+
+// archiveSegment names the archive segment the database was pruned to that covers the slot, ""
+// if none does.
+func (s *Server) archiveSegment(slot uint32) string {
+	segs, err := archive.Segments(s.db)
+	if err != nil {
+		return ""
+	}
+	for _, seg := range segs {
+		if seg.FromSlot <= slot && slot <= seg.ToSlot {
+			return seg.File
+		}
+	}
+	return ""
 }
 
 // page is the envelope of every paged list: next is the cursor of the following page, passed back

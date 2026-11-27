@@ -132,17 +132,18 @@ func (s *Server) outputs(ctx context.Context, where string, args ...any) ([]*out
 
 type txDetail struct {
 	*txRow
-	Source       string       `json:"source,omitempty"`
-	Inputs       []inputRef   `json:"inputs"`
-	Endorsements []txRef      `json:"endorsements"`
-	Baseline     *txRef       `json:"baseline,omitempty"`
-	Outputs      []*outputRow `json:"outputs"`
-	EndorsedBy   []txRef      `json:"endorsed_by"`
-	Branch       *branchRow   `json:"branch,omitempty"`
-	Hex          string       `json:"hex,omitempty"`
-	Parsed       string       `json:"parsed,omitempty"`
-	Decompiled   string       `json:"decompiled,omitempty"`
-	ParseError   string       `json:"parse_error,omitempty"`
+	Source         string       `json:"source,omitempty"`
+	ArchiveSegment string       `json:"archive_segment,omitempty"` // a pruned transaction: the segment holding it
+	Inputs         []inputRef   `json:"inputs"`
+	Endorsements   []txRef      `json:"endorsements"`
+	Baseline       *txRef       `json:"baseline,omitempty"`
+	Outputs        []*outputRow `json:"outputs"`
+	EndorsedBy     []txRef      `json:"endorsed_by"`
+	Branch         *branchRow   `json:"branch,omitempty"`
+	Hex            string       `json:"hex,omitempty"`
+	Parsed         string       `json:"parsed,omitempty"`
+	Decompiled     string       `json:"decompiled,omitempty"`
+	ParseError     string       `json:"parse_error,omitempty"`
 }
 
 // maxEndorsedBy caps the endorsers listed with a transaction; a branch can have thousands.
@@ -165,6 +166,9 @@ func (s *Server) tx(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	d.Source = store.Name(store.SourceNames, source)
+	if row.State == store.StateNames[store.StatePruned] {
+		d.ArchiveSegment = s.archiveSegment(row.Slot)
+	}
 
 	rows, err := s.db.QueryContext(ctx, `SELECT `+refColumns+`, i.idx, i.out_idx FROM input i JOIN tx t ON t.id = i.producer
 		WHERE i.tx = ? ORDER BY i.idx`, row.id)
@@ -222,21 +226,29 @@ func (s *Server) tx(w http.ResponseWriter, r *http.Request) error {
 
 // txBytes returns the stored bytes of the row, nil for a placeholder.
 func (s *Server) txBytes(ctx context.Context, id int64) ([]byte, error) {
-	var raw []byte
-	err := s.db.QueryRowContext(ctx, `SELECT bytes FROM tx_bytes WHERE id = ?`, id).Scan(&raw)
+	var data []byte
+	var dict sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT bytes, dict FROM tx_bytes WHERE id = ?`, id).Scan(&data, &dict)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return raw, err
+	if err != nil {
+		return nil, err
+	}
+	return s.Codec.Decode(dict, data)
 }
 
 func (s *Server) txBytesByTxID(ctx context.Context, txid base.TransactionID) ([]byte, error) {
-	var raw []byte
-	err := s.db.QueryRowContext(ctx, `SELECT b.bytes FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.txid = ?`, txid[:]).Scan(&raw)
+	var data []byte
+	var dict sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT b.bytes, b.dict FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.txid = ?`, txid[:]).Scan(&data, &dict)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return raw, err
+	if err != nil {
+		return nil, err
+	}
+	return s.Codec.Decode(dict, data)
 }
 
 // render prints the transaction with the library valid at its slot, in human-readable form and as

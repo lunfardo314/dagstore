@@ -10,7 +10,7 @@ import (
 )
 
 // SchemaVersion is stored in meta and bumped on any change of the schema below.
-const SchemaVersion = "2"
+const SchemaVersion = "3"
 
 // Transaction kinds (tx.kind).
 const (
@@ -94,9 +94,18 @@ CREATE TABLE tx (
 );
 CREATE INDEX tx_sequencer ON tx(sequencer, slot) WHERE sequencer IS NOT NULL;
 
+-- tx_bytes: dict is the zdict row the bytes are compressed with, NULL when stored raw
 CREATE TABLE tx_bytes (
 	id    INTEGER PRIMARY KEY,
-	bytes BLOB NOT NULL
+	bytes BLOB NOT NULL,
+	dict  INTEGER
+);
+
+CREATE TABLE zdict (
+	id         INTEGER PRIMARY KEY,
+	dict       BLOB    NOT NULL,
+	trained_at INTEGER NOT NULL,
+	samples    INTEGER NOT NULL
 );
 
 CREATE TABLE input (

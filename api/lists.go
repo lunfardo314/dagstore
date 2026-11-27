@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -397,7 +398,7 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) error {
 	if to < from {
 		return badRequest("to_slot is below from_slot")
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT b.bytes FROM tx t JOIN tx_bytes b ON b.id = t.id
+	rows, err := s.db.QueryContext(r.Context(), `SELECT b.bytes, b.dict FROM tx t JOIN tx_bytes b ON b.id = t.id
 		WHERE t.txid >= ? AND t.txid < ? ORDER BY t.txid`, slotKey(from), slotEndKey(to))
 	if err != nil {
 		return err
@@ -407,9 +408,15 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) error {
 	bw := bufio.NewWriterSize(w, 1<<16)
 	var lenBuf [4]byte
 	for rows.Next() {
-		var raw []byte
-		if err = rows.Scan(&raw); err != nil {
+		var data []byte
+		var dict sql.NullInt64
+		if err = rows.Scan(&data, &dict); err != nil {
 			return nil // the response has started; the client sees a truncated stream
+		}
+		raw, err := s.Codec.Decode(dict, data)
+		if err != nil {
+			slog.Error("export", "err", err)
+			return nil
 		}
 		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(raw)))
 		if _, err = bw.Write(lenBuf[:]); err == nil {
@@ -426,12 +433,17 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) error {
 // explorerStore gives the proxima DAG explorer the read interface it takes over the txstore:
 // lookup by txid and iteration by key prefix, here over the stored transactions.
 type explorerStore struct {
-	db *sql.DB
+	db    *sql.DB
+	codec *store.Codec
 }
 
 func (e *explorerStore) GetTxBytes(id *base.TransactionID) []byte {
-	var raw []byte
-	_ = e.db.QueryRow(`SELECT b.bytes FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.txid = ?`, id[:]).Scan(&raw)
+	var data []byte
+	var dict sql.NullInt64
+	if e.db.QueryRow(`SELECT b.bytes, b.dict FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.txid = ?`, id[:]).Scan(&data, &dict) != nil {
+		return nil
+	}
+	raw, _ := e.codec.Decode(dict, data)
 	return raw
 }
 
@@ -440,11 +452,12 @@ func (e *explorerStore) HasTxBytes(id *base.TransactionID) bool {
 }
 
 func (e *explorerStore) Iterator(prefix []byte) common.KVIterator {
-	return &explorerIterator{db: e.db, prefix: prefix}
+	return &explorerIterator{db: e.db, codec: e.codec, prefix: prefix}
 }
 
 type explorerIterator struct {
 	db     *sql.DB
+	codec  *store.Codec
 	prefix []byte
 }
 
@@ -459,9 +472,9 @@ func (it *explorerIterator) IterateKeys(fun func(k []byte) bool) {
 // iterate streams the stored transactions whose txid begins with the prefix, in key order, until
 // fun returns false.
 func (it *explorerIterator) iterate(withValues bool, fun func(k, v []byte) bool) {
-	query := `SELECT t.txid, NULL FROM tx t WHERE t.state = ?`
+	query := `SELECT t.txid, NULL, NULL FROM tx t WHERE t.state = ?`
 	if withValues {
-		query = `SELECT t.txid, b.bytes FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.state = ?`
+		query = `SELECT t.txid, b.bytes, b.dict FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.state = ?`
 	}
 	args := []any{store.StateLinked}
 	if len(it.prefix) > 0 {
@@ -479,7 +492,17 @@ func (it *explorerIterator) iterate(withValues bool, fun func(k, v []byte) bool)
 	defer rows.Close()
 	for rows.Next() {
 		var k, v []byte
-		if rows.Scan(&k, &v) != nil || !fun(k, v) {
+		var dict sql.NullInt64
+		if rows.Scan(&k, &v, &dict) != nil {
+			return
+		}
+		if v != nil {
+			var err error
+			if v, err = it.codec.Decode(dict, v); err != nil {
+				return
+			}
+		}
+		if !fun(k, v) {
 			return
 		}
 	}

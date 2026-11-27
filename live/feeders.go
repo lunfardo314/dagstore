@@ -16,8 +16,8 @@ type feeder struct {
 	lrbAt      time.Time
 	oldest     uint32 // oldest slot its txstore holds, and its purge floor
 	floor      uint32
-	budgetAt   time.Time // the second the pull budget below counts in
-	budgetUsed int
+	budget     budget // pulls sent this second
+	isDAGStore bool   // it announced itself by heartbeat: a source, paced as one
 
 	pushes, pulledIn, pullsSent, timeouts atomic.Int64
 	// silentPulls counts pulls timed out in a row, reset by any pull it answers; at

@@ -18,10 +18,13 @@ The full design is in [SPEC.md](SPEC.md).
 
 ## Status
 
-Early development. Two programs exist:
+Early development. Three programs exist:
 
 - `dagstore-import`, an offline importer: it reads the transaction store of a stopped Proxima node and writes the history it holds into a new dagstore database, to test the database design and measure its size on real data (results in [SPEC.md](SPEC.md), section 8.2.1).
-- `dagstore`, which serves such a database: the query API, a dashboard, and Proxima's DAG explorer pages. With a config file it also follows the network through one or more Proxima nodes, its *feeders*: it receives every transaction they take in, pulls what is missing, links and checks the history branch by branch and seals it ([SPEC.md](SPEC.md), section 6.7). Replication between dagstores, archive segments and node-side purging in production are not done yet.
+- `dagstore`, which serves such a database: the query API, a dashboard, and Proxima's DAG explorer pages. With a config file it also follows the network through one or more Proxima nodes, its *feeders*: it receives every transaction they take in, pulls what is missing, links and checks the history branch by branch and seals it ([SPEC.md](SPEC.md), section 6.7). A dagstore can also feed another one, which then keeps its own copy of the history (section 5.4).
+- `dagstore-archive`, which moves old history out of a database into compressed archive files, *segments*, and builds a database from them (section 8.3).
+
+Deleting history from the nodes' own storage, once a dagstore holds it, is built on the node side but has not been run in production yet.
 
 ## How to run
 
@@ -65,6 +68,20 @@ peering:
 ```
 
 The dashboard is at `http://127.0.0.1:8090/`, the DAG explorer at `/dag_explorer`, and the API endpoints are listed in [SPEC.md](SPEC.md), section 11.
+
+A dagstore that feeds another lists it in `peering.dagstores`, the other lists it in `peering.feeders`; two dagstores may feed each other.
+
+Old history can be moved to archive segments, with the dagstore stopped for the last two steps:
+
+```
+./dagstore-archive export -db live.db -to <last slot> -out archive/    # reads beside a running dagstore
+./dagstore-archive prune  -db live.db -segment archive/segment-<from>-<to>.json
+./dagstore-archive import -db other.db -segment archive/segment-<from>-<to>.json -libraries_from live.db
+```
+
+`prune` deletes the range only after checking the segment against the database. A pruned transaction still shows in `/tx`, with the segment that holds it.
+
+`proxi dagstore status|tx|branches|missing|export` queries a dagstore from the command line (Proxima's `proxi`, flag or profile key `dagstore.url`; not in a Proxima release yet).
 
 The dagstore depends on Proxima, never the other way round, and `go.mod` pins the exact Proxima commit it is built against ([SPEC.md](SPEC.md), section 2.3). To work on both at once, point the build at a local Proxima checkout with an untracked workspace file: `go work init . <path to proxima>`.
 

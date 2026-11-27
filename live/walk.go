@@ -218,8 +218,13 @@ func (n *Node) deps(id int64) ([]int64, error) {
 // transaction failing the check loses its bytes and is pulled again (SPEC.md section 6.4): ok is
 // false then. It returns the transactions the walk continues to.
 func (n *Node) link(id, bid int64, canonical bool) (deps []int64, ok bool, err error) {
-	var raw []byte
-	if err = n.queryRow(`SELECT bytes FROM tx_bytes WHERE id = ?`, id).Scan(&raw); err != nil {
+	var data []byte
+	var dict sql.NullInt64
+	if err = n.queryRow(`SELECT bytes, dict FROM tx_bytes WHERE id = ?`, id).Scan(&data, &dict); err != nil {
+		return nil, false, err
+	}
+	raw, err := n.codec.Decode(dict, data)
+	if err != nil {
 		return nil, false, err
 	}
 	tx, err := transaction.Parse(raw)
@@ -417,8 +422,11 @@ func (n *Node) sealStep() error {
 			continue
 		}
 		if c.tx != startID {
+			// a predecessor below the history held (pruned, archived) counts as sealed, as the
+			// starting branch's own does
 			var predSealed bool
-			if err = n.queryRow(`SELECT sealed FROM branch WHERE tx = ?`, c.pred.Int64).Scan(&predSealed); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			if err = n.queryRow(`SELECT coalesce(b.sealed, t.state = ?) FROM tx t LEFT JOIN branch b ON b.tx = t.id WHERE t.id = ?`,
+				store.StatePruned, c.pred.Int64).Scan(&predSealed); err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
 			if !predSealed {

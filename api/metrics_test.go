@@ -25,7 +25,11 @@ func TestMetrics(t *testing.T) {
 	defer db.Close()
 	cfg := DefaultConfig
 	cfg.DBPath = path
-	s := New(db, cfg, &Libraries{alarmIndex: map[string]bool{}})
+	codec, err := store.LoadCodec(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, cfg, &Libraries{alarmIndex: map[string]bool{}}, codec)
 
 	scrape := func() string {
 		w := httptest.NewRecorder()

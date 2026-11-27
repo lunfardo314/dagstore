@@ -71,11 +71,15 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	dbLock, err := store.LockShared(cfg.DBPath)
+	if err != nil {
+		fatal("lock", err)
+	}
+	defer dbLock.Release()
 
 	// live mode: the write connection and the ledger libraries come first, then the readers
 	var writeDB *sql.DB
 	var libs *api.Libraries
-	var err error
 	if *configPath != "" {
 		if writeDB, libs, err = live.Open(cfg.DBPath, libraryAPI); err != nil {
 			fatal("open database", err)
@@ -110,11 +114,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv := api.New(db, cfg, libs)
+	codec, err := store.LoadCodec(db)
+	if err != nil {
+		fatal("compression dictionaries", err)
+	}
+	srv := api.New(db, cfg, libs, codec)
 	go srv.RunStats(ctx)
 	if writeDB != nil {
 		env := global.NewFromConfig()
-		node, err := live.New(writeDB, db, env, cfg.Params, libs, libraryAPI)
+		node, err := live.New(writeDB, db, env, cfg.Params, libs, codec, libraryAPI)
 		if err != nil {
 			fatal("live", err)
 		}

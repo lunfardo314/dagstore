@@ -17,14 +17,17 @@ import (
 
 // counters of the intake, written by peering's goroutines and the loop, read by the API
 var (
-	cntPushed, cntPulledIn, cntDuplicate, cntNotFeeder, cntBadBytes, cntStored, cntVersionMismatch, cntUnparsed atomic.Int64
+	cntPushed, cntPulledIn, cntDuplicate, cntNotFeeder, cntBadBytes, cntStored, cntVersionMismatch, cntUnparsed, cntToReplicas atomic.Int64
 )
 
 // onTxBytes is peering's gossip callback. Only feeders are heard (SPEC.md section 5.3); copies of
 // a transaction already seen are dropped on the txid prefix, which can be trusted from a feeder.
-// Parsing is stage 1 only: the signature is checked when the transaction is linked.
+// Anyone else is heard only answering a pull of this dagstore, from the other dagstores and the
+// broad pull: checked for its txid, and dropped if it does not parse. Parsing is stage 1 only:
+// the signature is checked when the transaction is linked.
 func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) {
-	if !n.peers.IsFeeder(from) {
+	isFeeder := n.peers.IsFeeder(from)
+	if !isFeeder && !n.gate.WasPulled(txid) {
 		cntNotFeeder.Add(1)
 		return
 	}
@@ -34,7 +37,7 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 		return
 	}
 	tx, err := transaction.Parse(txBytes)
-	if errors.Is(err, transaction.ErrTxVersionMismatch) {
+	if errors.Is(err, transaction.ErrTxVersionMismatch) && isFeeder {
 		// A feeder pushes only what it accepted: the network runs a library this dagstore lacks.
 		// The bytes are kept under the feeder's txid, which can be trusted from a feeder, and
 		// parsed after the restart that loads the library.
@@ -50,6 +53,11 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 		return
 	}
 	n.gate.Accept(txid)
+	if !isFeeder {
+		cntPulledIn.Add(1)
+		n.in <- received{from: from, tx: tx, txid: txid, raw: txBytes, pulled: true, notFeeder: true}
+		return
+	}
 	fd := n.feederByID[from]
 	if pulled {
 		cntPulledIn.Add(1)
@@ -64,8 +72,12 @@ func (n *Node) onTxBytes(from peer.ID, txBytes []byte, txid base.TransactionID) 
 
 // onPullRequest answers a peer's pull from the database: any age, since the dagstore keeps it all.
 func (n *Node) onPullRequest(from peer.ID, txid base.TransactionID) {
-	var raw []byte
-	if err := n.readDB().QueryRow(`SELECT b.bytes FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.txid = ?`, txid[:]).Scan(&raw); err == nil {
+	var data []byte
+	var dict sql.NullInt64
+	if err := n.readDB().QueryRow(`SELECT b.bytes, b.dict FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.txid = ?`, txid[:]).Scan(&data, &dict); err != nil {
+		return
+	}
+	if raw, err := n.codec.Decode(dict, data); err == nil {
 		n.peers.SendTxBytesToPeer(from, raw, txid)
 	}
 }
@@ -83,7 +95,16 @@ func (n *Node) intake(r received) error {
 		return err
 	}
 	source := store.SourcePush
-	if r.pulled {
+	switch {
+	case r.notFeeder:
+		// another dagstore's answer is a pull like a feeder's; anyone else's, a broad pull's
+		source = store.SourceBroad
+		if fd := n.otherByID[r.from]; fd != nil {
+			source = store.SourcePull
+			fd.pulledIn.Add(1)
+			fd.silentPulls.Store(0)
+		}
+	case r.pulled:
 		source = store.SourcePull
 	}
 	switch {
@@ -106,10 +127,17 @@ func (n *Node) intake(r received) error {
 		len(raw), store.StateIntake, source, time.Now().Unix(), id); err != nil {
 		return err
 	}
-	if _, err = n.exec(`INSERT OR REPLACE INTO tx_bytes(id, bytes) VALUES (?, ?)`, id, raw); err != nil {
+	dict, data := n.codec.Encode(raw)
+	if _, err = n.exec(`INSERT OR REPLACE INTO tx_bytes(id, bytes, dict) VALUES (?, ?, ?)`, id, data, dict); err != nil {
 		return err
 	}
 	cntStored.Add(1)
+	// stored for the first time: on to the dagstores this one feeds, except the one it came from,
+	// so in a ring of dagstores each transaction crosses each link at most once
+	if n.feedsDAGStores {
+		n.peers.PushTxBytesToDAGStores(raw, txid, r.from)
+		cntToReplicas.Add(1)
+	}
 	if r.tx == nil {
 		cntUnparsed.Add(1)
 		return nil
@@ -142,7 +170,7 @@ func (n *Node) parsed(id int64, tx *transaction.Transaction) error {
 // one it needs. A transaction still of a library not held stays unparsed; one whose bytes do not
 // parse or do not hash to the feeder's txid is deleted, and pulled again if a walk needs it.
 func (n *Node) parsePending() error {
-	rows, err := n.query(`SELECT t.id, t.txid, b.bytes FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.state = ? AND t.parsed = 0`, store.StateIntake)
+	rows, err := n.query(`SELECT t.id, t.txid, b.bytes, b.dict FROM tx t JOIN tx_bytes b ON b.id = t.id WHERE t.state = ? AND t.parsed = 0`, store.StateIntake)
 	if err != nil {
 		return err
 	}
@@ -154,7 +182,12 @@ func (n *Node) parsePending() error {
 	var ps []pending
 	for rows.Next() {
 		var p pending
-		if err = rows.Scan(&p.id, &p.txid, &p.raw); err != nil {
+		var dict sql.NullInt64
+		if err = rows.Scan(&p.id, &p.txid, &p.raw, &dict); err != nil {
+			rows.Close()
+			return err
+		}
+		if p.raw, err = n.codec.Decode(dict, p.raw); err != nil {
 			rows.Close()
 			return err
 		}

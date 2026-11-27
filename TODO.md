@@ -5,16 +5,13 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 ## Before a real deployment
 
 - **First sync from genesis.** Only run so far from a snapshot, a few hundred slots of history. A full first sync fetches the branch list of the whole history from feeders whose txstore reaches genesis: the same code, not yet run at that scale.
+- **Replication and archive segments over the network.** Both are checked on real history on one machine (`live/TestReplication`, `live/TestArchiveRoundTrip`), not yet between two hosts or with a node feeding the source.
 
 ## Missing parts of the design
 
-- **Replication** (5.4). A dagstore cannot feed another: no push from its intake, no answers to `PullLRB` or `PullBranchList` from its database.
-- **Broad pull and pulls from other dagstores** (6.3, steps 3 and 4 of the ladder). A transaction no feeder has is declared lost. It matters only for canonical cones.
-- **Real forks** (6.6). If the feeders' lineage forks below the canonical tip, the tip stops with an error instead of renumbering.
-- **Archive segments and pruning** (8.3). No export of old ranges to compressed segments, no import of a segment, no deleting a range; `PRAGMA incremental_vacuum` never runs.
-- **Compression of transaction bytes** (8.2.1). Raw bytes are about three quarters of the database; zstd with a dictionary is the first thing to try.
-- **`proxi dagstore` commands** (10.9), a client of the query API.
-- **Dashboard**: replicas (11.1). Per-feeder figures are shown.
+- **Renumbering below the starting branch** (6.6). A real fork whose fork point lies below the starting branch, deeper than the history held, is refused with an error.
+- **Importing a segment below the history held.** A segment is imported into a new database or appended after its canonical tip; restoring a pruned range under a database's starting branch is not supported.
+- **Retraining the compression dictionary** (8.2.1). The first dictionary is used for good; the schema allows later ones, but nothing decides when to train one.
 
 ## Node side, built but not rehearsed
 
@@ -22,7 +19,7 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 
 ## Documentation and presentation
 
-- **User-facing documentation and an operations guide**, for this repository (README) and for the public docs site: what the dagstore is, how to set it up beside a node, the config keys, the dashboard and the query API, and running and recovering it.
+- **User-facing documentation and an operations guide**, for this repository (README) and for the public docs site: what the dagstore is, how to set it up beside a node, the config keys, the dashboard and the query API, archiving, replication, and running and recovering it.
 - **Code comments**: explain the why throughout and point to SPEC.md where a rule comes from, naming the spec and the topic rather than section numbers, which drift.
 - **A better-looking dashboard**: clearer layout and hierarchy, the important numbers first, light and dark themes kept.
 
@@ -35,4 +32,4 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 ## Smaller
 
 - Move the offline importer onto proxima's `txstore/conewalk`, if still worth it now that the row derivation is shared.
-- Missing records do not yet say which feeders were tried, only how many rounds.
+- Counters of the live process are package-wide, so two dagstores in one process (the replication test) share them in `/status`; per-node counters if that ever matters beyond tests.

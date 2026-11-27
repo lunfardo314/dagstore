@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -31,21 +32,33 @@ import (
 const commitPeriod = time.Second
 
 type Node struct {
-	db         *sql.DB // the write connection, used by the loop goroutine only
-	rdb        *sql.DB // read connections, for answering peers' pulls
-	tx         *sql.Tx
-	stmts      map[string]*sql.Stmt
-	params     dagstore.Params
-	env        *global.Global
-	peers      *peering.Peers
-	feeders    []*feeder
-	feederByID map[peer.ID]*feeder
-	gate       *ingate.Gate[base.TransactionID]
+	db     *sql.DB // the write connection, used by the loop goroutine only
+	rdb    *sql.DB // read connections, for answering peers' pulls
+	tx     *sql.Tx
+	stmts  map[string]*sql.Stmt
+	params dagstore.Params
+	env    *global.Global
+	peers  *peering.Peers
+	alive  func(peer.ID) bool // the peers' liveness, as peering sees it
+	// replicas are the dagstores this one feeds (peering.dagstores): they get every transaction stored
+	replicas       []peer.ID
+	feedsDAGStores bool
+	importing      bool // importing an archive segment, which gives the canonical lineage
+	feeders        []*feeder
+	feederByID     map[peer.ID]*feeder
+	// others are the dagstores among the peers that are not feeders, known by their heartbeat:
+	// the pull ladder asks them after the feeders. Only added to, so that an index stays valid.
+	others    []*feeder
+	otherByID map[peer.ID]*feeder
+	broad     budget // broad pulls this second
+	history   budget // pulls to node feeders this second
+	gate      *ingate.Gate[base.TransactionID]
 
 	in         chan received
 	lineage    chan any // lineage replies of the feeders and fetched libraries, for the loop
 	libs       *api.Libraries
 	libraryAPI string
+	codec      *store.Codec
 
 	// state of the loop goroutine
 	startSlot        uint32 // slot of the starting branch, 0 until it is known
@@ -57,8 +70,9 @@ type Node struct {
 	branchFetch      branchFetch
 	pulls            map[base.TransactionID]*pullState
 
-	mu   sync.Mutex // guards info, read by the API
-	info api.LiveStatus
+	mu       sync.Mutex // guards info, read by the API
+	info     api.LiveStatus
+	lrbReply atomic.Pointer[peering.LRBReply] // the answer to replicas' PullLRB
 }
 
 // received is a transaction from a feeder, parsed, or only its bytes when they are of a library
@@ -70,6 +84,9 @@ type received struct {
 	txid   base.TransactionID
 	raw    []byte
 	pulled bool
+	// notFeeder: from a peer that is not a feeder, answering a pull: another dagstore or, after a
+	// broad pull, any peer
+	notFeeder bool
 }
 
 // Open opens (or creates) the database at path and loads the ledger libraries: from the database,
@@ -197,11 +214,16 @@ func (n *Node) onLibraries(r librariesFetched) error {
 }
 
 // New sets up peering as a dagstore and the intake. The ledger libraries must be loaded.
-func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params, libs *api.Libraries, libraryAPI string) (*Node, error) {
+func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params, libs *api.Libraries, codec *store.Codec, libraryAPI string) (*Node, error) {
 	cfg, err := peering.ReadConfig()
 	if err != nil {
 		return nil, err
 	}
+	return newNode(db, readDB, env, params, libs, codec, libraryAPI, cfg)
+}
+
+func newNode(db, readDB *sql.DB, env *global.Global, params dagstore.Params, libs *api.Libraries, codec *store.Codec, libraryAPI string,
+	cfg *peering.Config) (*Node, error) {
 	cfg.IsDAGStore = true
 	if len(cfg.Feeders) == 0 {
 		return nil, fmt.Errorf("peering.feeders: no feeder declared")
@@ -221,8 +243,19 @@ func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params, libs *a
 		lineage:    make(chan any, 100),
 		libs:       libs,
 		libraryAPI: libraryAPI,
+		codec:      codec,
 		pulls:      make(map[base.TransactionID]*pullState),
 		feederByID: make(map[peer.ID]*feeder),
+		otherByID:  make(map[peer.ID]*feeder),
+	}
+	n.alive = peers.IsAlive
+	n.feedsDAGStores = len(cfg.DAGStores) > 0
+	for _, name := range cfg.DAGStores {
+		info, err := peer.AddrInfoFromP2pAddr(cfg.PreConfiguredPeers[name].Multiaddr)
+		if err != nil {
+			return nil, fmt.Errorf("peering.dagstores: '%s': %w", name, err)
+		}
+		n.replicas = append(n.replicas, info.ID)
 	}
 	for _, name := range cfg.Feeders {
 		info, err := peer.AddrInfoFromP2pAddr(cfg.PreConfiguredPeers[name].Multiaddr)
@@ -235,7 +268,15 @@ func New(db, readDB *sql.DB, env *global.Global, params dagstore.Params, libs *a
 	}
 	peers.OnReceiveTxBytes(n.onTxBytes)
 	peers.OnReceivePullTxRequest(n.onPullRequest)
+	peers.OnPullLRB(n.answerPullLRB)
+	peers.OnPullBranchList(n.answerPullBranchList)
 	peers.OnLRBReply(func(from peer.ID, r peering.LRBReply) { n.lineage <- lrbMsg{from, r} })
+	peers.OnDAGStoreHeartbeat(func(from peer.ID, _ bool, _ peering.DAGStoreHeartbeat) {
+		select {
+		case n.lineage <- heartbeatMsg{from}:
+		default: // the next heartbeat comes in HeartbeatPeriod
+		}
+	})
 	peers.OnBranchListReply(func(from peer.ID, r peering.BranchListReply) { n.lineage <- branchListMsg{from, r} })
 	return n, nil
 }
@@ -262,9 +303,8 @@ func (n *Node) Run(ctx context.Context) error {
 	defer lrbPoll.Stop()
 	heartbeat := time.NewTicker(n.params.HeartbeatPeriod)
 	defer heartbeat.Stop()
-	// pulls within both budgets: overall and per feeder
-	pullRate := max(1, min(n.params.HistoryPullsPerSecond, n.params.PullsPerSecondPerFeeder*len(n.feeders)))
-	pullTick := time.NewTicker(time.Second / time.Duration(pullRate))
+	// pulls go out in batches within their budgets per second (pullDue)
+	pullTick := time.NewTicker(100 * time.Millisecond)
 	defer pullTick.Stop()
 	report := time.NewTicker(time.Minute)
 	defer report.Stop()
@@ -286,7 +326,7 @@ func (n *Node) Run(ctx context.Context) error {
 		case <-commit.C:
 			err = n.step()
 		case <-pullTick.C:
-			err = n.pullOne()
+			err = n.pullDue()
 		case <-lrbPoll.C:
 			n.pollLRB()
 		case <-heartbeat.C:
@@ -319,6 +359,9 @@ func (n *Node) step() error {
 		return err
 	}
 	if err := n.sealStep(); err != nil {
+		return err
+	}
+	if err := n.codec.TrainIfDue(n.tx); err != nil {
 		return err
 	}
 	if err := n.tx.Commit(); err != nil {

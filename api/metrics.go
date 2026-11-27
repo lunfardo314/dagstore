@@ -42,6 +42,11 @@ var (
 	mFeederPulled = desc("feeder_pulled_in_total", "Pulled transactions the feeder answered", "feeder")
 	mFeederPulls  = desc("feeder_pulls_sent_total", "Pulls sent to the feeder", "feeder")
 	mFeederTimeo  = desc("feeder_timeouts_total", "Pulls the feeder left unanswered", "feeder")
+	mOthers       = desc("other_dagstores", "Dagstores among the peers that are not feeders")
+	mReplicaAlive = desc("replica_alive", "1 if the replica is alive", "replica")
+	mOtherPulled  = desc("other_dagstore_pulled_in_total", "Pulled transactions the other dagstore answered", "peer")
+	mOtherPulls   = desc("other_dagstore_pulls_sent_total", "Pulls sent to the other dagstore", "peer")
+	mOtherTimeo   = desc("other_dagstore_timeouts_total", "Pulls the other dagstore left unanswered", "peer")
 
 	mStatsAge     = desc("stats_age_seconds", "Age of the stats snapshot the whole-table metrics come from")
 	mTx           = desc("tx", "Transactions by state", "state")
@@ -54,6 +59,7 @@ var (
 	mDiskFree     = desc("disk_free_bytes", "Free disk space beside the database")
 	mBytesPerTx   = desc("bytes_per_stored_tx", "Database file bytes per stored transaction")
 	mHistoryDays  = desc("history_days", "Days of canonical history held")
+	mSegments     = desc("archive_segments", "Archive segments the database was pruned to")
 	mStatsSeconds = desc("stats_seconds", "Time the latest stats snapshot took")
 )
 
@@ -70,12 +76,15 @@ var liveCounters = []struct {
 	{desc("stored_total", "Transactions stored"), func(l *LiveStatus) int64 { return l.Stored }},
 	{desc("linked_total", "Transactions linked by the walk"), func(l *LiveStatus) int64 { return l.Linked }},
 	{desc("sig_failed_total", "Transactions whose signature did not verify"), func(l *LiveStatus) int64 { return l.SigFailed }},
-	{desc("pulls_sent_total", "Pulls sent, all feeders"), func(l *LiveStatus) int64 { return l.PullsSent }},
+	{desc("pulls_sent_total", "Pulls sent to one peer, feeders and other dagstores"), func(l *LiveStatus) int64 { return l.PullsSent }},
+	{desc("broad_pulls_total", "Broad pulls, each sent to every alive peer"), func(l *LiveStatus) int64 { return l.BroadPulls }},
+	{desc("to_replicas_total", "Transactions passed on to the replicas"), func(l *LiveStatus) int64 { return l.ToReplicas }},
 	{desc("lost_total", "Transactions declared lost after the pull rounds"), func(l *LiveStatus) int64 { return l.Lost }},
 	{desc("purged_orphans_total", "Orphans purged"), func(l *LiveStatus) int64 { return l.Purged }},
 	{desc("version_mismatch_total", "Transactions of a version the dagstore's libraries do not know"), func(l *LiveStatus) int64 { return l.VersionMismatch }},
 	{desc("stored_unparsed_total", "Transactions stored unparsed, waiting for a library"), func(l *LiveStatus) int64 { return l.Unparsed }},
 	{desc("tip_held_total", "LRB answers on which the feeders did not agree, the tip held"), func(l *LiveStatus) int64 { return l.TipHeld }},
+	{desc("renumbered_total", "Real forks: the canonical lineage renumbered from a fork point"), func(l *LiveStatus) int64 { return l.Renumbered }},
 }
 
 type collector struct{ s *Server }
@@ -127,6 +136,19 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		for _, lc := range liveCounters {
 			counter(lc.d, lc.get(l))
 		}
+		gauge(mOthers, float64(len(l.OtherDAGStores)))
+		for _, f := range l.Replicas {
+			alive := 0.0
+			if f.Alive {
+				alive = 1
+			}
+			gauge(mReplicaAlive, alive, f.Peer)
+		}
+		for _, f := range l.OtherDAGStores {
+			counter(mOtherPulled, f.PulledIn, f.Peer)
+			counter(mOtherPulls, f.PullsSent, f.Peer)
+			counter(mOtherTimeo, f.Timeouts, f.Peer)
+		}
 		for _, f := range l.FeederList {
 			alive := 0.0
 			if f.Alive {
@@ -174,6 +196,7 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 	gauge(mDiskFree, float64(d.DiskFreeBytes))
 	gauge(mBytesPerTx, d.BytesPerStoredTx)
 	gauge(mHistoryDays, d.HistoryDays)
+	gauge(mSegments, float64(len(d.ArchiveSegments)))
 }
 
 // metricsHandler serves the dagstore's metrics, the Go runtime's and the process's, and those of

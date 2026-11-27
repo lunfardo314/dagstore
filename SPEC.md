@@ -142,6 +142,10 @@ A dagstore's feeder can be another dagstore. That is the replication mechanism: 
 
 A replica announces its own sealed branch like any dagstore; nodes act only on the dagstores they declared, so a replica nobody declared never causes a node to delete anything.
 
+**Built.** A dagstore pushes what its intake stores for the first time to the dagstores in its `peering.dagstores`, except the peer it came from. It answers `PullLRB` with the LRB its own feeders agree on and its starting slot as the oldest slot it holds; nothing is answered before both are known. It answers `PullBranchList` from its branch table, listing only branches whose bytes are stored, with the predecessor their stem names, and refusing ranges as long as a node refuses. Pulls are answered from the database, as before. The handlers run on peering's goroutines and read only committed data. A replica learns from its feeder's heartbeat that the feeder is a dagstore, and pulls from it at `SourcePullsPerSecond`. `/status`, the dashboard and the metrics show the replicas and the other dagstores.
+
+Checked by `live/TestReplication`: two dagstores over real peering on localhost, each the other's feeder and replica. A is fed 160 slots of real history (135,767 transactions) through its intake while it runs, about 2,000 a second. B starts empty and learns everything from A: the LRB and the branch list by lineage requests, and the transactions by push and, for what a full send queue dropped, by pull. B ends with the same canonical lineage, the same confirmations per canonical branch, the same kept transactions (78,317) and the same sealed tip, built independently. It got about 123,000 transactions by push and 10,500 to 12,300 by pull, with no timeouts, and pushed nothing back to A. That run is what found the dropped losing branches (the trailing check above) and the losses on a quiet link (the rule on unavailable rounds).
+
 ## 6. Building the canonical DAG
 
 ### 6.1 No ledger state anywhere
@@ -261,7 +265,21 @@ A transaction whose version the dagstore's libraries do not know raises an alarm
 
 **Several feeders.** Each feeder's latest LRB answer is kept with its age; answers older than three polls do not count. A candidate is supported by every feeder whose LRB has it on its lineage, so feeders a slot or two apart on one lineage agree; the tip is the newest candidate a majority supports, and without a majority it holds where it is, with a warning. The branch list fetch waits for every alive feeder's first answer (at most 15 s), starts at the oldest slot any of them holds, and asks a feeder whose txstore reaches the slots requested. A pull starts at the feeder chosen by the transaction's slot and goes round the feeders on timeouts, skipping those not alive; each feeder's budget per second is kept. A feeder that leaves 5 pulls in a row unanswered is passed over for 30 s, since peering takes a while to see a peer gone; any answer resets the count. `/status` and the dashboard show each feeder: alive, its LRB and age, how far back its txstore reaches, pushes, pulls answered and sent, timeouts. The selection rules are unit-tested. Run live with two feeders over about 25 minutes: both answered and agreed (the tip held once, at the start, while one feeder's LRB was not yet stored); pulls split about evenly; each transaction arrived twice and the copy was dropped; with one feeder stopped for 3 minutes the tip and sealing went on through the other, nothing was lost, and the stopped feeder cost 27 timeouts (278 before the pause rule); when it came back, pulls returned to it within a minute.
 
-**Not built yet:** broad pulls; renumbering after a real fork (the canonical tip stops moving and an error is logged); replication and the source side of section 5.4; archive segments.
+**The rest of the pull ladder.** After the feeders come the other dagstores among the peers, known by their heartbeat, then, for a transaction a canonical branch waits for (or a branch of the LRB's lineage), one broad pull to every peer, at `BroadPullPerSecond`. A step that cannot serve the transaction is skipped: a feeder whose txstore starts above the slot or whose purge floor is above it, a peer not alive or paused. A round in which a step was skipped only because its peer was down or paused does not count towards `lost`: it is tried again after `PullTimeout`. Without that rule a quiet link, which peering reports as not alive for some seconds, made three empty rounds in a row and declared lost transactions that the feeder held. Answers from a peer that is not a feeder are taken only for a txid this dagstore pulled, checked against the bytes, and never stored unparsed. Pulls go out in batches every 100 ms within their budgets: `PullsPerSecondPerFeeder` per node feeder and `HistoryPullsPerSecond` over them all, `SourcePullsPerSecond` per dagstore, feeder or not. A missing record names the peers asked in its last round.
+
+**The trailing check of the branch list.** A push that a full send queue drops is recovered by pull only if something references the transaction; a losing branch is referenced by nothing, so it would never enter the branch table. Once a minute, while the canonical tip moves, the branch list is fetched again for at most `BranchListMaxSlots` slots after the last slot checked, never past the canonical tip. A branch it finds missing is claimed and then walked and pulled like any other. The load is one request a minute.
+
+**Real forks** (section 6.6). When the feeders' LRB leaves the canonical lineage at a numbered branch F below the canonical tip, everything happens in one SQL transaction:
+
+- the branches above F lose their canonical numbers;
+- what they confirmed loses its confirmation. This is found by walking from each of them through the transactions it confirmed, as `/confirmed_in` does, so no full scan;
+- the new lineage is numbered from F on, and its branches walked as non-canonical are marked unwalked;
+- the fork rows the change touches are deleted and built again by the walk's own rule, in slot order: the forks of the newly canonical branches, the forks leaving from a demoted branch, and the demoted branches themselves, now one fork from F;
+- the walk, the sealed tip and the canonical tip move back to F.
+
+The canonical walk then confirms the new lineage's cones. Nothing stored or sealed changes. Checked on a synthetic branch table of two lineages split at slot 100, with transactions shared by both cones, transactions on one side only, and a losing branch forking off the old lineage above F. A store that followed lineage A to slot 236 and then saw the LRB move to B ends equal to a store that followed B from the start: canonical lineage, confirmations, fork rows with their sealed tips, branch-to-fork assignment, sealed and canonical tips, and the walk position after a restart. A lineage that meets the stored one only below the starting branch is refused, with an error.
+
+**Not built yet:** renumbering below the starting branch.
 
 ## 7. Libraries, network identity, and the nodes' txstore
 
@@ -319,7 +337,8 @@ Every transaction gets a small integer id (the SQLite rowid) and every edge refe
 | Table | Columns | Notes |
 |-------|---------|-------|
 | `tx` | `id` (rowid), `txid` UNIQUE, `slot`, `tick`, `kind` (branch / sequencer / plain / mining), `sequencer` (chain id), `baseline` (the explicit baseline, an edge of the cone walk too), `size`, `state` (missing / lost / intake / linked), `kept`, `confirming_branch` (null if on no canonical cone), `sig_checked`, `parsed`, `source` (push / pull / broad / import), `received_at` | txids begin with the timestamp, so inserts land at the end of the txid index; index on `(sequencer, slot)` |
-| `tx_bytes` | `id`, `bytes` | Separate, so index scans stay small; a rowid table keeps blobs up to about 4 KB inline in a 4 KB page, larger ones spill to overflow pages |
+| `tx_bytes` | `id`, `bytes`, `dict` | Separate, so index scans stay small; a rowid table keeps blobs up to about 4 KB inline in a 4 KB page, larger ones spill to overflow pages. `dict` is the zstd dictionary the bytes are compressed with, NULL when raw (section 8.2.1) |
+| `zdict` | `id`, `dict`, `trained_at`, `samples` | Compression dictionaries, never deleted |
 | `input` | `tx`, `idx`, `producer`, `out_idx` | Consumption edges; index on `(producer, out_idx)` for "who spent this output" |
 | `endorsement` | `tx`, `idx`, `endorsed` | Index on `endorsed` |
 | `output` | `tx`, `idx`, `amount`, `lock_kind`, `account`, `chain` | Parsed with `txbuildercore` (`ClassifyChain`, lock classifiers); indexes on `account`, `chain` |
@@ -373,7 +392,8 @@ The offline import prototype (`cmd/dagstore-import`) loaded the txstore of an ac
 | sequencer index | 16 |
 | branch and fork tables | 9 |
 
-  Edges and outputs cost far less than estimated, because nearly every transaction is a sequencer milestone with few outputs. The raw bytes are the size. The node's own Badger txstore held all 10.1 M transactions in 4.8 GB on disk, compressed, against the 10.8 GB here: compressing `tx_bytes` (for example zstd with a dictionary trained on transactions) is the first thing to try if size matters.
+  Edges and outputs cost far less than estimated, because nearly every transaction is a sequencer milestone with few outputs. The raw bytes are the size. The node's own Badger txstore held all 10.1 M transactions in 4.8 GB on disk, compressed, against the 10.8 GB here.
+- **Compressed (built).** Each row of `tx_bytes` is compressed on its own, since every read is of one transaction, with a zstd dictionary (112 KB, level "better") trained on the store's own first 30,000 transactions. A row names its dictionary (column `dict`, NULL when raw; table `zdict`), and a dictionary is never deleted, so a later one can be trained without touching older rows. A new database stores raw until it holds 30,000 transactions. It then trains once and recompresses them in the same SQL transaction: about 5 s, or 18 s for a backlog of 420,000 rows, since training takes at most the first 30,000. On 50,000 transactions spread over the same history, trained on the first tenth: no dictionary leaves 79% of the bytes, 32 KB 56.5%, 112 KB 55%, level "best" 54.5% at 50 times the encoding time. Encoding takes about 27 µs and decoding under 1 µs a transaction. The same import with compression: **7.15 GB, 753 bytes per kept transaction** (−34%), `tx_bytes` 459 B instead of 849, at 5,572 kept transactions a second. Content identical: same kept, confirmed and missing counts, `/export` byte-equal over 100 and 500 slots, and `/tx` equal except the importer's internal fork ids. The replay tests decode every stored row and compare it with the txstore. Schema version 3; a version 2 database is not migrated: imported again.
 - **Rate:** at the load of that period, 6.7 M kept transactions a day, about 7.6 GB a day, about 2.8 TB a year; with canonical cones only, about 4.6 GB a day.
 - **Checks:** every one of the 9.49 M signatures verified with the plain ed25519 check over the txid (section 5.3); no parse failure, no txid mismatch. 123 producers were missing, all in losing branches' cones: every canonical branch sealed, 105 losing branches did not.
 - **Speed:** the cone walk ran at about 5,100 kept transactions a second on one core (31 minutes), with 10 GB of memory, most of it the in-memory map from txid to row id.
@@ -394,6 +414,39 @@ The one thing that does not split well is the account index, written all over th
 ### 8.3 Pruning to the archive
 
 Below a configured slot, the dagstore exports a sealed range into an archive segment: raw bytes in slot order, zstd-compressed (ratio to be measured; signatures, keys and hashes do not compress, repeated bytecode does), with a manifest (slot range, first and last branch, count, a hash over the sorted txids, the lost records of the range). Then it deletes the range and moves the starting branch up. A reference to a pruned transaction resolves to "pruned, archive segment X". A segment can be imported into any dagstore; this is also how a new dagstore starts without pulling the whole history.
+
+**Built** (package `archive`, command `dagstore-archive`, segment import in `live`). A segment is two files:
+
+- `segment-<from>-<to>.zst` holds the stored transactions of the range in txid order, each as a 4-byte big-endian length and its bytes (the `/export` format), in one zstd stream;
+- `segment-<from>-<to>.json` is the manifest: the slot range, the genesis library hash, the count and raw bytes, the file's SHA-256, a SHA-256 over the txids in order, the canonical branch of every slot, and the lost records.
+
+The commands:
+
+- **`export`** refuses a range that is not final: an unsealed branch in it, a transaction in it still pending a pull, or no sealed canonical branch above it. It reads beside a running dagstore.
+- **`verify`** parses every record with the store's libraries and checks the order, the slot range, both hashes and the count.
+- **`prune`** needs the database to itself. Every process that opens a database holds a shared lock on `<db>.lock`; pruning takes it exclusive and fails while anything else has the file open. It verifies the segment again, checks that the database stores exactly the segment's transactions in the range and that the range begins at the starting branch, then works in one SQL transaction:
+  - the range's bytes, edges, outputs, gap records, branches and the forks ending in it are deleted;
+  - a transaction still referenced from above (an input, endorsement, baseline, branch predecessor or fork row) stays as a `pruned` placeholder, so that no edge dangles; the rest is deleted;
+  - the oldest canonical branch above the range becomes the starting branch, and the segment is recorded in `meta`.
+
+  An incremental vacuum then returns the pages.
+- **`import`** feeds a segment through the live intake, walk and sealing, slot by slot. The manifest's canonical branch of each slot stands in for the feeders' LRB, at depth 0, since the lineage is given. The branch table, confirmations, forks and seals are built, not copied. It starts a new database, its libraries fetched with proof (`-library_api`) or copied from another database (`-libraries_from`), or it appends to a database whose canonical tip the segment continues. Nothing is pulled; what the source declared lost is lost.
+
+`/tx` of a pruned transaction, whether a placeholder or deleted, names its segment, and `/stats`, the dashboard and `dagstore_archive_segments` list the segments. A branch whose predecessor is pruned counts its predecessor as sealed, as the starting branch does.
+
+**The cut is at a slot.** A transaction in the pruned range that was first included by a canonical branch above it leaves with its range. It is in the segment, and the pruned database keeps it only as a placeholder without its confirmation. Importing the segments in order restores it.
+
+Checked by `live/TestArchiveRoundTrip` on the imported history of section 8.2.1:
+
+| Step | Result |
+|------|--------|
+| Export 1,000 slots | 753,538 transactions, 496 MB raw in a 123 MB segment (24.7%, the stream compressing far better than single rows), 5 s |
+| Import into a new database | 2 min 45 s; equal to the source in canonical lineage, the confirmations of all 1,000 canonical branches, kept transactions (592,948 away from the segment's end) and sealed branches (74,357) |
+| Prune the source | 28 s; no dangling edge, 4,843 placeholders kept; the file shrank from 7.15 to 6.59 GB |
+| Export the next 500 slots from the pruned source and append them to the imported database | equal to the source in canonical lineage, confirmations, kept transactions and seals |
+
+The test also found that the offline importer left its branches unwalked and wrote no `waiting` rows for its gaps, so a live process could not take over its database; it now writes both.
+
 
 ## 9. Constants (initial proposals)
 
@@ -422,7 +475,7 @@ Small, behind config, inactive unless a dagstore is declared. No ledger change, 
 6. **ledger:** a library initialiser from the ledger identity and `ledger.Upgrades`, without a state store.
 7. **api/dag_explorer:** nothing to change. It already takes an interface, `TxStore` (lookup by txid and iteration by key prefix), which the dagstore implements over SQLite (section 11.2).
 8. **peering:** the `PullLRB` and `PullBranchList` request types and their replies (the `PullLRB` reply also carries the feeder's oldest txstore slot and purge floor, for the dashboard, section 11.1), answered only to trusted dagstores (section 6.2.1); the branch list over the txstore only on a node. The request handlers sit behind an interface, so a dagstore acting as source answers them from its database (section 5.4); the push side is the same `PushTxBytesToDAGStores`.
-9. **proxi:** a later `proxi dagstore ...` command group, a client of the dagstore API.
+9. **proxi:** `proxi dagstore status|tx|branches|missing|export`, a client of the dagstore API over HTTP only (profile key or flag `dagstore.url`, default `http://127.0.0.1:8090`), so proxima does not import the dagstore.
 
 `peering.New` needs an environment satisfying `global.NodeGlobal`; the dagstore provides it with `proxima/global`, as the node does. `forward_sync` is not touched.
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/lunfardo314/dagstore"
+	"github.com/lunfardo314/dagstore/archive"
 	"github.com/lunfardo314/dagstore/store"
 	"github.com/lunfardo314/proxima/ledger"
 )
@@ -43,6 +44,9 @@ type LiveStatus struct {
 	Feeders         int            `json:"feeders"`
 	FeedersAlive    int            `json:"feeders_alive"`
 	FeederList      []FeederStatus `json:"feeder_list"`
+	OtherDAGStores  []FeederStatus `json:"other_dagstores"` // dagstores among the peers that are not feeders, asked after them
+	Replicas        []FeederStatus `json:"replicas"`        // the dagstores this one feeds
+	ToReplicas      int64          `json:"to_replicas"`     // transactions passed on to them
 	LRB             string         `json:"lrb,omitempty"`
 	LRBSlot         uint32         `json:"lrb_slot,omitempty"`
 	BranchFetch     BranchFetch    `json:"branch_fetch"`
@@ -58,11 +62,13 @@ type LiveStatus struct {
 	Linked          int64          `json:"linked"`
 	SigFailed       int64          `json:"sig_failed"`
 	PullsSent       int64          `json:"pulls_sent"`
+	BroadPulls      int64          `json:"broad_pulls"`
 	Lost            int64          `json:"lost"`
 	Purged          int64          `json:"purged_orphans"`
 	VersionMismatch int64          `json:"version_mismatch"`
 	Unparsed        int64          `json:"stored_unparsed"`
-	TipHeld         int64          `json:"tip_held"` // LRB answers on which the feeders did not agree
+	TipHeld         int64          `json:"tip_held"`   // LRB answers on which the feeders did not agree
+	Renumbered      int64          `json:"renumbered"` // real forks: the canonical lineage renumbered from a fork point
 }
 
 // FeederStatus is one feeder as the live process sees it.
@@ -245,16 +251,17 @@ type Stats struct {
 		Chains   map[string]int64 `json:"chains"`
 	} `json:"dictionaries"`
 	Database struct {
-		FileBytes          int64       `json:"file_bytes"`
-		WALBytes           int64       `json:"wal_bytes"`
-		PageSize           int64       `json:"page_size"`
-		Pages              int64       `json:"pages"`
-		FreePages          int64       `json:"free_pages"`
-		DiskFreeBytes      int64       `json:"disk_free_bytes"`
-		BytesPerStoredTx   float64     `json:"bytes_per_stored_tx"`
-		HistoryDays        float64     `json:"history_days"`
-		BytesPerHistoryDay float64     `json:"bytes_per_history_day"`
-		Tables             []tableSize `json:"tables"`
+		FileBytes          int64             `json:"file_bytes"`
+		WALBytes           int64             `json:"wal_bytes"`
+		PageSize           int64             `json:"page_size"`
+		Pages              int64             `json:"pages"`
+		FreePages          int64             `json:"free_pages"`
+		DiskFreeBytes      int64             `json:"disk_free_bytes"`
+		BytesPerStoredTx   float64           `json:"bytes_per_stored_tx"`
+		HistoryDays        float64           `json:"history_days"`
+		BytesPerHistoryDay float64           `json:"bytes_per_history_day"`
+		Tables             []tableSize       `json:"tables"`
+		ArchiveSegments    []archive.Segment `json:"archive_segments"` // the ranges pruned to segments, oldest first
 	} `json:"database"`
 	Libraries []LibraryInfo `json:"libraries"`
 	Config    Config        `json:"config"`
@@ -362,6 +369,12 @@ func (s *Server) computeStats(ctx context.Context) (*Stats, error) {
 	rows.Close()
 	if err = s.databaseStats(ctx, st); err != nil {
 		return nil, err
+	}
+	if st.Database.ArchiveSegments, err = archive.Segments(s.db); err != nil {
+		return nil, err
+	}
+	if st.Database.ArchiveSegments == nil {
+		st.Database.ArchiveSegments = []archive.Segment{}
 	}
 	return st, nil
 }

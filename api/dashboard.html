@@ -157,7 +157,11 @@ function renderStatus(st) {
       `<br><span class="muted">txstore from ${f.oldest_slot ? num(f.oldest_slot) : "—"}` +
       (f.purge_floor ? `, purge floor ${num(f.purge_floor)}` : "") +
       `; ${num(f.pushes)} pushed, ${num(f.pulled_in)} of ${num(f.pulls_sent)} pulls answered, ${num(f.timeouts)} timeouts</span>`]),
-    ["Replicas", '<span class="muted">none declared</span>'],
+    ...((lv.replicas || []).length ? [["Replicas", `${num(lv.to_replicas)} transactions passed on`]].concat(lv.replicas.map(f => [
+      `…${f.peer.slice(-8)}`, `<span class="${f.alive ? "ok" : "bad"}">${f.alive ? "alive" : "down"}</span>`])) :
+      [["Replicas", '<span class="muted">none declared</span>']]),
+    ...((lv.other_dagstores || []).length ? [["Other dagstores", '<span class="muted">asked after the feeders</span>']].concat(lv.other_dagstores.map(f => [
+      `…${f.peer.slice(-8)}`, `${num(f.pulled_in)} of ${num(f.pulls_sent)} pulls answered, ${num(f.timeouts)} timeouts`])) : []),
   ] : [["Feeders", '<span class="muted">none declared</span>'], ["Replicas", '<span class="muted">none declared</span>']]);
   const rate = k => {
     if (!lv || !prevLive) return "—";
@@ -167,6 +171,8 @@ function renderStatus(st) {
   rows("intake", lv ? [
     ["Pushes", `${rate("pushed")} <span class="muted">(${num(lv.pushed)} since start)</span>`],
     ["Pulls answered", `${rate("pulled_in")} <span class="muted">(${num(lv.pulled_in)}; ${num(lv.pulls_sent)} sent, ${num(lv.pending_pulls)} pending)</span>`],
+    ["Broad pulls", `${num(lv.broad_pulls)} <span class="muted">(to every peer, for canonical cones only)</span>`],
+    ["Real forks", `${num(lv.renumbered)} <span class="muted">(canonical lineage renumbered)</span>`, lv.renumbered ? "warn" : ""],
     ["Copies dropped", num(lv.duplicates)],
     ["Linked", `${rate("linked")} <span class="muted">(${num(lv.linked)})</span>`],
     ["Refused", `${num(lv.bad_bytes)} bad bytes, ${num(lv.sig_failed)} bad signatures, ${num(lv.version_mismatch)} of a library not held, ${num(lv.not_from_feeders)} not from feeders`,
@@ -214,7 +220,9 @@ function renderStats(s) {
     ["Per day of history", bytes(d.bytes_per_history_day) + ` <span class="muted">(${bytes(d.bytes_per_history_day * 365)} a year)</span>`],
     ["Free pages", `${num(d.free_pages)} <span class="muted">(${bytes(d.free_pages * d.page_size)} awaiting incremental vacuum)</span>`],
     ["Disk free", bytes(d.disk_free_bytes)],
-    ["Archive segments", '<span class="muted">none (nothing pruned)</span>'],
+    ["Archive segments", (d.archive_segments || []).length ? d.archive_segments.map(g =>
+      `<span class="mono">${esc(g.file)}</span> <span class="muted">slots ${num(g.from_slot)}..${num(g.to_slot)}</span>`).join("<br>") :
+      '<span class="muted">none (nothing pruned)</span>'],
   ]);
   const max = Math.max(...d.tables.map(x => x.bytes), 1);
   $("tables").innerHTML = d.tables.filter(x => x.bytes >= 1e6).map(x =>

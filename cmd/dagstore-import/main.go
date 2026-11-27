@@ -73,7 +73,11 @@ func main() {
 		log.Fatalf("libraries: %v", err)
 	}
 
-	im := &importer{src: src, db: db, ids: make(map[base.TransactionID]*node), commitEvery: *commitEvery}
+	codec, err := store.LoadCodec(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	im := &importer{src: src, db: db, ids: make(map[base.TransactionID]*node), commitEvery: *commitEvery, codec: codec}
 	t0 := time.Now()
 	im.scan()
 	log.Printf("scan: %d transactions, %d bytes, slots %d..%d, %d branches, in %v",
@@ -118,6 +122,7 @@ type importer struct {
 	tx          *sql.Tx
 	stmts       map[string]*sql.Stmt
 	commitEvery int
+	codec       *store.Codec
 
 	minSlot, maxSlot uint32
 	branchesBySlot   map[uint32][]base.TransactionID
@@ -284,6 +289,9 @@ func (im *importer) walk() {
 			b.sealed = p.sealed && b.gaps == 0
 		}
 		if (i+1)%im.commitEvery == 0 {
+			if err := im.codec.TrainIfDue(im.tx); err != nil {
+				log.Fatal(err)
+			}
 			im.commit()
 			im.begin()
 		}
@@ -309,6 +317,7 @@ func (im *importer) walkBranch(b *branchInfo) {
 		case nodePlaceholder:
 			if txid.Slot() >= im.startSlot {
 				*im.curGaps++
+				im.exec("waiting", n.id, bid)
 			}
 			continue
 		case nodeKept:
@@ -324,6 +333,7 @@ func (im *importer) walkBranch(b *branchInfo) {
 		if tx == nil {
 			im.placeholder(n, txid, store.StateMissing)
 			*im.curGaps++
+			im.exec("waiting", n.id, bid) // as the live walk records it, so live sealing can take over
 			continue
 		}
 		if n.state == nodeKept {
@@ -414,7 +424,8 @@ func (im *importer) insert(n *node, tx *transaction.Transaction, canonical bool,
 	}
 	im.exec("tx", n.id, txid[:], txid.Slot(), txid.Timestamp().Tick, kind, seq, baseline, len(raw), store.StateLinked,
 		confirming, boolInt(sigOK), 1, store.SourceImport)
-	im.exec("tx_bytes", n.id, raw)
+	dict, data := im.codec.Encode(raw)
+	im.exec("tx_bytes", n.id, data, dict)
 	im.stats.kept++
 	im.stats.keptBytes += int64(len(raw))
 	im.keptInTxst[txid] = struct{}{}
@@ -536,7 +547,7 @@ var statements = map[string]string{
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	"placeholder": `INSERT INTO tx(id, txid, slot, tick, state) VALUES (?,?,?,?,?)`,
 	"confirm":     `UPDATE tx SET confirming_branch = ? WHERE id = ?`,
-	"tx_bytes":    `INSERT INTO tx_bytes(id, bytes) VALUES (?,?)`,
+	"tx_bytes":    `INSERT INTO tx_bytes(id, bytes, dict) VALUES (?,?,?)`,
 	"input":       `INSERT INTO input(tx, idx, producer, out_idx) VALUES (?,?,?,?)`,
 	"endorsement": `INSERT INTO endorsement(tx, idx, endorsed) VALUES (?,?,?)`,
 	"output":      `INSERT INTO output(tx, idx, amount, lock_kind, account, chain) VALUES (?,?,?,?,?,?)`,
@@ -544,10 +555,12 @@ var statements = map[string]string{
 	"chain":       `INSERT INTO chain(id, chain_id, kind) VALUES (?,?,?)`,
 	"lock_kind":   `INSERT INTO lock_kind(id, name) VALUES (?,?)`,
 	"missing":     `INSERT INTO missing(tx) VALUES (?)`,
-	"branch": `INSERT INTO branch(tx, slot, sequencer, predecessor, total_coverage, total_supply, slot_inflation, canonical_no, fork, sealed, gaps)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-	"fork": `INSERT INTO fork(id, tip, fork_point, length, sealed_tip) VALUES (?,?,?,?,?)`,
-	"meta": `INSERT INTO meta(key, value) VALUES (?,?)`,
+	// every branch of the table is walked here: walked = 1, as the live walk leaves it
+	"branch": `INSERT INTO branch(tx, slot, sequencer, predecessor, total_coverage, total_supply, slot_inflation, canonical_no, fork, sealed, gaps, walked)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,1)`,
+	"waiting": `INSERT OR IGNORE INTO waiting(tx, branch) VALUES (?,?)`,
+	"fork":    `INSERT INTO fork(id, tip, fork_point, length, sealed_tip) VALUES (?,?,?,?,?)`,
+	"meta":    `INSERT INTO meta(key, value) VALUES (?,?)`,
 }
 
 func (im *importer) begin() {

@@ -217,6 +217,8 @@ func newReplay(t *testing.T, withhold map[uint32]bool) *replay {
 	must(t, err)
 	r.n = &Node{db: r.db, params: dagstore.DefaultParams, pulls: make(map[base.TransactionID]*pullState),
 		gate: ingate.New[base.TransactionID](time.Hour, 100_000, 1_000_000)}
+	r.n.codec, err = store.LoadCodec(r.db)
+	must(t, err)
 	r.n.branchFetch.started, r.n.branchFetch.done = true, true
 	must(t, r.n.begin())
 	return r
@@ -238,6 +240,7 @@ func (r *replay) step(lrb *base.TransactionID) {
 		must(r.t, r.n.walkStep())
 	}
 	must(r.t, r.n.sealStep())
+	must(r.t, r.n.codec.TrainIfDue(r.n.tx))
 	must(r.t, r.n.tx.Commit())
 	must(r.t, r.n.begin())
 }
@@ -264,6 +267,8 @@ func (r *replay) check() {
 			t.Errorf("%d dangling edges: %s", dangling, q)
 		}
 	}
+
+	r.checkBytes()
 
 	var startSlot, tipSlot uint32
 	must(t, db.QueryRow(`SELECT min(slot), max(slot) FROM branch WHERE canonical_no IS NOT NULL`).Scan(&startSlot, &tipSlot))
@@ -302,6 +307,41 @@ func (r *replay) check() {
 	t.Logf("slots %d..%d: %d canonical branches, %d differ in confirmations; kept %d, imported %d", lo, hi, len(got), diff, gotKept, wantKept)
 	if gotKept != wantKept {
 		t.Errorf("kept transactions in slots %d..%d: %d, imported %d", lo, hi, gotKept, wantKept)
+	}
+}
+
+// checkBytes decodes every stored transaction and compares it with the txstore's bytes: the rows
+// stored raw before the dictionary was trained, those recompressed when it was, and those
+// compressed from then on. The range holds far more than the training sample, so all three occur.
+func (r *replay) checkBytes() {
+	t := r.t
+	rows, err := r.db.Query(`SELECT t.txid, b.bytes, b.dict FROM tx t JOIN tx_bytes b ON b.id = t.id`)
+	must(t, err)
+	defer rows.Close()
+	var raw, compressed, storedBytes, rawBytes int64
+	for rows.Next() {
+		var txid, data []byte
+		var dict sql.NullInt64
+		must(t, rows.Scan(&txid, &data, &dict))
+		got, err := r.n.codec.Decode(dict, data)
+		must(t, err)
+		id, err := base.TransactionIDFromBytes(txid)
+		must(t, err)
+		if want := r.src.Get(id[:]); string(got) != string(want) {
+			t.Fatalf("bytes of %s differ from the txstore's", id.StringShort())
+		}
+		if dict.Valid {
+			compressed++
+		} else {
+			raw++
+		}
+		storedBytes += int64(len(data))
+		rawBytes += int64(len(got))
+	}
+	must(t, rows.Err())
+	t.Logf("bytes: %d rows compressed, %d raw, stored %.3f of raw size", compressed, raw, float64(storedBytes)/float64(max(1, rawBytes)))
+	if compressed == 0 {
+		t.Errorf("no row compressed: the dictionary was not trained")
 	}
 }
 

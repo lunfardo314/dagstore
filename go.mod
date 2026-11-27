@@ -7,6 +7,7 @@ require (
 	github.com/libp2p/go-libp2p v0.48.0
 	github.com/lunfardo314/proxima v1.8.0
 	github.com/lunfardo314/unitrie v0.0.0-20261118094029-1b2fa7867ece
+	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/viper v1.21.0
 	modernc.org/sqlite v1.62.0
 )
@@ -98,7 +99,6 @@ require (
 	github.com/pion/webrtc/v4 v4.2.16 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/polydawn/refmt v0.90.0 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.0 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect

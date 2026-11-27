@@ -21,6 +21,7 @@ import (
 	"github.com/lunfardo314/dagstore/store"
 	"github.com/lunfardo314/proxima/api/dag_explorer"
 	"github.com/lunfardo314/proxima/ledger/base"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Config bounds what one request may cost: the API is unauthenticated, so every list is paged and
@@ -57,6 +58,9 @@ type Server struct {
 	Live func() *LiveStatus
 	// Libs are the ledger libraries in use, with their alarms
 	Libs *Libraries
+	// ExtraMetrics, when set, are served at /metrics beside the dagstore's own: in live mode the
+	// registry where proxima's peering keeps its metrics
+	ExtraMetrics prometheus.Gatherer
 }
 
 func New(db *sql.DB, cfg Config, libs *Libraries) *Server {
@@ -91,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	handle("GET /confirmed_in/{branch}", s.confirmedIn)
 	handle("GET /missing", s.missing)
 	handle("GET /export", s.export)
+	mux.Handle("GET /metrics", s.metricsHandler(s.ExtraMetrics))
 	dag_explorer.Register(func(path string, h func(http.ResponseWriter, *http.Request)) {
 		mux.HandleFunc("GET "+path, h)
 	}, &explorerStore{db: s.db})

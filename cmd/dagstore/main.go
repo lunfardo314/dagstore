@@ -119,6 +119,7 @@ func main() {
 			fatal("live", err)
 		}
 		srv.Live = node.Status
+		srv.ExtraMetrics = env.MetricsRegistry()
 		go func() {
 			if err := node.Run(ctx); err != nil {
 				fatal("live", err)

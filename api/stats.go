@@ -119,6 +119,15 @@ type Status struct {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
 	ctx, cancel := s.ctx(r)
 	defer cancel()
+	st, err := s.currentStatus(ctx)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, st)
+}
+
+// currentStatus is what /status returns; the metrics are read off it too.
+func (s *Server) currentStatus(ctx context.Context) (*Status, error) {
 	st := &Status{
 		Version:     dagstore.Version,
 		CommitHash:  dagstore.CommitHash,
@@ -136,17 +145,17 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
 	}{{"starting_branch", &st.StartingBranch}, {"canonical_tip", &st.CanonicalTip}} {
 		v, err := s.meta(ctx, p.key)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if v != nil {
 			if *p.dst, err = s.branchPoint(ctx, `WHERE t.txid = ?`, st.CurrentSlot, v); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	if st.NewestSealedCanonical, err = s.branchPoint(ctx, `WHERE b.tx = (SELECT tx FROM branch
 		WHERE canonical_no IS NOT NULL AND sealed = 1 ORDER BY canonical_no DESC LIMIT 1)`, st.CurrentSlot); err != nil {
-		return err
+		return nil, err
 	}
 	if s.Live != nil {
 		st.Mode = "live: following feeders"
@@ -154,7 +163,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
 		st.HistoryWalker = st.Live.WalkerSlot
 		if st.Live.LRB != "" {
 			if st.FeedersLRB, err = s.branchPoint(ctx, `WHERE t.txid = ?`, st.CurrentSlot, mustHex(st.Live.LRB)); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
@@ -164,7 +173,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) error {
 		st.LongForks = ptr(snap.Forks.Longer)
 		st.StatsAt = &snap.ComputedAt
 	}
-	return writeJSON(w, st)
+	return st, nil
 }
 
 func ptr[T any](v T) *T { return &v }

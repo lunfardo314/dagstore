@@ -492,6 +492,15 @@ On the imported database (9.5 M transactions, 10.8 GB): lookups by txid, output,
 
 Metrics on the dagstore: intake rate, copies per feeder, history walker slot, sealed canonical lag, branches and forks stored, missing pending / lost, pulls per feeder, timeouts, broad pulls, DB size. On the node: purge floor, slots purged, txstore size after GC.
 
+**Built.** `/metrics` on the API port, Prometheus text, every name prefixed `dagstore_`. The values are read at scrape time off the same views as `/status` and `/stats`, so they never disagree with the dashboard, and the whole-table ones are as old as the latest stats snapshot (`dagstore_stats_age_seconds`):
+
+- **Where the store stands:** `slot` and `lag_slots` by `point` (`starting`, `sealed_canonical`, `canonical_tip`, `feeders_lrb`, `walker`), `current_slot`, `alarms`.
+- **Live process** (live mode only): counters since start `pushed_total`, `pulled_in_total`, `duplicates_total`, `pulls_sent_total`, `lost_total`, `sig_failed_total` and the rest of `/status`'s; gauges `feeders`, `feeders_alive`, `intake_queue`, `pending_pulls`, `branch_fetch_slot`; per `feeder` (its peer ID) `feeder_alive`, `feeder_lrb_slot`, `feeder_oldest_slot`, `feeder_purge_floor` and the counters `feeder_pushes_total`, `feeder_pulled_in_total`, `feeder_pulls_sent_total`, `feeder_timeouts_total`. Copies per feeder are its pushes against `stored_total`.
+- **From the stats snapshot:** `tx` and `tx_bytes` by `state`, `tx_confirmed`, `branches` by `set`, `forks` by `length`, `missing` by `state`, `db_bytes` by `part` (`file`, `wal`, `free_pages`), `disk_free_bytes`, `bytes_per_stored_tx`, `history_days`, `stats_seconds`.
+- Beside them the Go runtime's and the process's metrics and, in live mode, the `proxima_peering_*` metrics of the peering the dagstore runs.
+
+Broad pulls have no metric, since they are not built.
+
 ## 13. Open questions
 
 **Open: the cones of losing branches.** Section 8.2.1 found 86 branches per slot on history before library upgrade 7, and their cones adding 39% to the kept transactions. The choices: keep them as decided; keep every losing branch's own transaction but not the part of its cone outside canonical history, recorded as placeholders of a new state; or decide after measuring history after upgrade 7, where fewer branches are expected.

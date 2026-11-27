@@ -4,7 +4,6 @@ What the dagstore does not do yet, measured against [SPEC.md](SPEC.md). Section 
 
 ## Before a real deployment
 
-- **Metrics** (12). Nothing is exported to Prometheus; `/status`, `/stats` and the dashboard are the only views.
 - **First sync from genesis.** Only run so far from a snapshot, a few hundred slots of history. A full first sync fetches the branch list of the whole history from feeders whose txstore reaches genesis: the same code, not yet run at that scale.
 
 ## Missing parts of the design

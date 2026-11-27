@@ -43,6 +43,8 @@ go build -o dagstore ./cmd/dagstore
 
 It logs to standard error: startup, a stats line every 10 minutes, server errors and requests slower than 2 s (`-slow_request`); `-log_level debug` adds every request.
 
+The dashboard is at `/`; Prometheus metrics are at `/metrics` on the same address (the list is in [SPEC.md](SPEC.md), section 12).
+
 Following the network takes a config file with a `dagstore` section and Proxima's `peering` section, the feeding node listed as a static peer and named in `peering.feeders`; the node, on its side, lists the dagstore as a static peer and in `peering.dagstores`:
 
 ```
